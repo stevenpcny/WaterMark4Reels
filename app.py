@@ -531,8 +531,8 @@ with left_col:
         with src_col1:
             source_folder_input = st.text_input(
                 "原视频目录", label_visibility="collapsed",
-                value=st.session_state.get("source_folder_upload_val", ""),
-                placeholder="/Users/你的用户名/Videos/reels",
+                value=st.session_state.get("source_folder_upload_val", str(Path.home() / "Downloads")),
+                placeholder="/Users/你的用户名/Downloads",
             )
             st.session_state["source_folder_upload_val"] = source_folder_input
         with src_col2:
@@ -548,8 +548,8 @@ with left_col:
         with out_col1:
             output_folder = st.text_input(
                 "输出路径", label_visibility="collapsed",
-                value=st.session_state.get("output_folder_upload_val", ""),
-                placeholder="留空 = 输出到原视频目录",
+                value=st.session_state.get("output_folder_upload_val", str(Path.home() / "Downloads")),
+                placeholder="/Users/你的用户名/Downloads",
             )
             st.session_state["output_folder_upload_val"] = output_folder
         with out_col2:
@@ -602,8 +602,8 @@ with left_col:
         with of_col1:
             output_folder = st.text_input(
                 "输出路径", label_visibility="collapsed",
-                value=st.session_state.get("output_folder_path_val", ""),
-                placeholder="留空 = 与原视频同目录",
+                value=st.session_state.get("output_folder_path_val", str(Path.home() / "Downloads")),
+                placeholder="/Users/你的用户名/Downloads",
             )
             st.session_state["output_folder_path_val"] = output_folder
         with of_col2:
@@ -668,7 +668,7 @@ with left_col:
                 elif source_folder:
                     out_path = Path(source_folder)
                 else:
-                    out_path = Path.home() / "Desktop"
+                    out_path = Path.home() / "Downloads"
 
                 # ── Fix #8: 提前验证写入权限 ──
                 path_ok = True
