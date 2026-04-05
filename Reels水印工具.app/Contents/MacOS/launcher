@@ -1,0 +1,197 @@
+#!/bin/bash
+
+# ── 工具路径 ──
+SCRIPT_DIR="$(cd "$(dirname "$0")/../../../" && pwd)"
+APP_PY="$SCRIPT_DIR/app.py"
+LOG="$SCRIPT_DIR/install.log"
+
+# ── 提示弹窗 ──
+notify() {
+    osascript -e "display notification \"$1\" with title \"Reels 水印工具\""
+}
+
+alert() {
+    osascript -e "display alert \"$1\" message \"$2\" as critical"
+}
+
+progress_start() {
+    osascript -e "
+        tell application \"System Events\"
+            display dialog \"$1\" buttons {} with icon note giving up after 300
+        end tell" &>/dev/null &
+    PROGRESS_PID=$!
+}
+
+progress_end() {
+    kill $PROGRESS_PID 2>/dev/null
+    wait $PROGRESS_PID 2>/dev/null
+}
+
+# ── 检查 app.py ──
+if [ ! -f "$APP_PY" ]; then
+    alert "启动失败" "未找到 app.py，请确保 Reels水印工具.app 与 app.py 在同一个文件夹中。"
+    exit 1
+fi
+
+# ── 如果已有实例运行，直接打开浏览器 ──
+if lsof -i :8501 -sTCP:LISTEN -t &>/dev/null; then
+    open http://localhost:8501
+    exit 0
+fi
+
+echo "=== 启动检查 $(date) ===" > "$LOG"
+
+# ════════════════════════════════════
+# 1. 检查 Python 3
+# ════════════════════════════════════
+PYTHON=$(command -v python3 2>/dev/null)
+if [ -z "$PYTHON" ]; then
+    alert "缺少 Python 3" "请先从 python.org 下载安装 Python 3，安装完成后重新打开本工具。"
+    open "https://www.python.org/downloads/macos/"
+    exit 1
+fi
+echo "Python: $PYTHON" >> "$LOG"
+
+# ════════════════════════════════════
+# 2. 检查 / 安装 Python 依赖
+# ════════════════════════════════════
+MISSING_PKGS=()
+$PYTHON -c "import streamlit" 2>/dev/null || MISSING_PKGS+=("streamlit")
+$PYTHON -c "import pandas"    2>/dev/null || MISSING_PKGS+=("pandas")
+$PYTHON -c "import PIL"       2>/dev/null || MISSING_PKGS+=("Pillow")
+
+if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+    PKG_LIST="${MISSING_PKGS[*]}"
+    progress_start "正在安装 Python 依赖（${PKG_LIST}），请稍候..."
+    echo "安装 Python 包: $PKG_LIST" >> "$LOG"
+
+    $PYTHON -m pip install --quiet "${MISSING_PKGS[@]}" >> "$LOG" 2>&1
+    PIP_STATUS=$?
+    progress_end
+
+    if [ $PIP_STATUS -ne 0 ]; then
+        alert "安装失败" "Python 依赖安装失败，请查看日志：$LOG"
+        exit 1
+    fi
+    notify "Python 依赖安装完成"
+fi
+
+# ── 找 streamlit 可执行文件 ──
+STREAMLIT=$($PYTHON -c "
+import sys, os
+scripts = os.path.join(os.path.dirname(sys.executable), 'streamlit')
+if os.path.isfile(scripts):
+    print(scripts)
+    exit()
+import site
+for d in site.getusersitepackages(), site.getuserbase():
+    p = os.path.join(d, '..', 'bin', 'streamlit')
+    p = os.path.normpath(p)
+    if os.path.isfile(p):
+        print(p)
+        exit()
+import sysconfig
+for scheme in ['posix_user', 'posix_prefix', 'osx_framework_user']:
+    try:
+        p = os.path.join(sysconfig.get_path('scripts', scheme), 'streamlit')
+        if os.path.isfile(p):
+            print(p)
+            exit()
+    except Exception:
+        pass
+" 2>/dev/null)
+
+[ -z "$STREAMLIT" ] && STREAMLIT=$(command -v streamlit 2>/dev/null)
+
+if [ -z "$STREAMLIT" ]; then
+    for p in \
+        "$HOME/Library/Python/3.9/bin/streamlit" \
+        "$HOME/Library/Python/3.10/bin/streamlit" \
+        "$HOME/Library/Python/3.11/bin/streamlit" \
+        "$HOME/Library/Python/3.12/bin/streamlit" \
+        "$HOME/Library/Python/3.13/bin/streamlit" \
+        /usr/local/bin/streamlit \
+        /opt/homebrew/bin/streamlit; do
+        [ -f "$p" ] && STREAMLIT="$p" && break
+    done
+fi
+
+if [ -z "$STREAMLIT" ] || [ ! -f "$STREAMLIT" ]; then
+    alert "找不到 streamlit" "安装似乎成功，但无法定位 streamlit 命令，请查看日志：$LOG"
+    exit 1
+fi
+echo "Streamlit: $STREAMLIT" >> "$LOG"
+
+# ════════════════════════════════════
+# 3. 检查 / 安装 FFmpeg
+# ════════════════════════════════════
+FFMPEG=$(command -v ffmpeg 2>/dev/null || echo "")
+for p in /usr/local/bin/ffmpeg /opt/homebrew/bin/ffmpeg; do
+    [ -f "$p" ] && FFMPEG="$p" && break
+done
+
+if [ -z "$FFMPEG" ]; then
+    echo "FFmpeg 未找到，尝试安装..." >> "$LOG"
+
+    BREW=$(command -v brew 2>/dev/null || echo "")
+    [ -z "$BREW" ] && [ -f /usr/local/bin/brew ]    && BREW=/usr/local/bin/brew
+    [ -z "$BREW" ] && [ -f /opt/homebrew/bin/brew ] && BREW=/opt/homebrew/bin/brew
+
+    if [ -z "$BREW" ]; then
+        progress_start "正在安装 Homebrew，首次安装需要几分钟，请稍候..."
+        echo "安装 Homebrew..." >> "$LOG"
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" >> "$LOG" 2>&1
+        progress_end
+
+        for p in /usr/local/bin/brew /opt/homebrew/bin/brew; do
+            [ -f "$p" ] && BREW="$p" && break
+        done
+
+        if [ -z "$BREW" ]; then
+            alert "安装失败" "Homebrew 安装失败，请手动安装后重试：\nhttps://brew.sh"
+            exit 1
+        fi
+    fi
+
+    progress_start "正在安装 FFmpeg，请稍候（约需 1-3 分钟）..."
+    echo "安装 FFmpeg via $BREW..." >> "$LOG"
+    "$BREW" install ffmpeg >> "$LOG" 2>&1
+    BREW_STATUS=$?
+    progress_end
+
+    if [ $BREW_STATUS -ne 0 ]; then
+        alert "安装失败" "FFmpeg 安装失败，请查看日志：$LOG"
+        exit 1
+    fi
+
+    for p in /usr/local/bin/ffmpeg /opt/homebrew/bin/ffmpeg; do
+        [ -f "$p" ] && FFMPEG="$p" && break
+    done
+
+    notify "FFmpeg 安装完成"
+fi
+echo "FFmpeg: $FFMPEG" >> "$LOG"
+
+# ════════════════════════════════════
+# 4. 启动 Streamlit
+# ════════════════════════════════════
+export HOME="${HOME:-/Users/$(whoami)}"
+
+COMMAND="cd '$SCRIPT_DIR' && '$PYTHON' '$SCRIPT_DIR/start.py'; exit"
+
+osascript <<APPLESCRIPT
+tell application "Terminal"
+    set w to do script "$COMMAND"
+    delay 0.5
+    set miniaturized of window 1 to true
+end tell
+APPLESCRIPT
+
+# 等待 Streamlit 就绪后打开浏览器（最多等 30 秒）
+for i in $(seq 1 60); do
+    sleep 0.5
+    if curl -s http://localhost:8501 &>/dev/null; then
+        open http://localhost:8501
+        break
+    fi
+done

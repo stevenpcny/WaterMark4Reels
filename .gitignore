@@ -1,0 +1,22 @@
+# 运行时生成
+presets.json
+token.json
+install.log
+.oauth_error
+.write_test
+
+# 临时预览文件
+/tmp/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# 上传缓存
+reels_watermark_uploads/
