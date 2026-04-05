@@ -43,6 +43,19 @@ def check_ffmpeg() -> bool:
     )
 
 
+@lru_cache(maxsize=1)
+def check_videotoolbox() -> bool:
+    """检测当前 FFmpeg 是否支持 Apple VideoToolbox（GPU 编码）"""
+    try:
+        result = subprocess.run(
+            [_ffmpeg_bin(), "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "h264_videotoolbox" in result.stdout
+    except Exception:
+        return False
+
+
 # ── Fix #2: 字体扫描结果缓存，进程级别只扫描一次 ──
 @lru_cache(maxsize=1)
 def get_available_fonts() -> dict:
@@ -237,10 +250,10 @@ def add_watermark(
     quality: int = 18,
     custom_x: Optional[int] = None,
     custom_y: Optional[int] = None,
+    encoder: str = "cpu",
 ) -> tuple:
     """给视频添加文字水印（Pillow 生成水印层，FFmpeg overlay 合成）"""
     size = _get_video_size(input_path)
-    # Fix #6: 尺寸获取失败时返回错误
     if size[0] is None:
         return False, f"无法获取视频信息：{size[1]}"
 
@@ -249,14 +262,21 @@ def add_watermark(
         w, h, text, position, font_size, opacity, font_color, font_path, custom_x, custom_y
     )
     try:
+        # 编码器参数
+        if encoder == "gpu" and check_videotoolbox():
+            # Apple VideoToolbox：用码率控制，GPU 加速
+            bitrate = _crf_to_bitrate(quality, w, h)
+            codec_args = ["-c:v", "h264_videotoolbox", "-b:v", bitrate]
+        else:
+            # libx264：CPU 精确质量控制
+            codec_args = ["-c:v", "libx264", "-crf", str(quality), "-preset", "slow"]
+
         cmd = [
             _ffmpeg_bin(),
             "-i", str(input_path),
             "-i", overlay_path,
             "-filter_complex", "overlay=0:0",
-            "-c:v", "libx264",
-            "-crf", str(quality),
-            "-preset", "slow",
+            *codec_args,
             "-c:a", "copy",
             "-y",
             str(output_path),
@@ -271,6 +291,18 @@ def add_watermark(
         return False, str(e)
     finally:
         os.unlink(overlay_path)
+
+
+def _crf_to_bitrate(crf: int, width: int, height: int) -> str:
+    """将 CRF 值近似转换为 VideoToolbox 码率（基于分辨率）"""
+    pixels = width * height
+    # 基准：1080x1920 @ CRF18 ≈ 8Mbps
+    base = 8_000_000 * (pixels / (1080 * 1920))
+    # CRF 每增加 6，码率约减半
+    factor = 2 ** ((18 - crf) / 6)
+    kbps = int(base * factor / 1000)
+    kbps = max(1000, min(kbps, 20_000))
+    return f"{kbps}k"
 
 
 def parse_mapping(text: str) -> dict:

@@ -9,6 +9,7 @@ from pathlib import Path
 from watermark import (
     add_watermark,
     check_ffmpeg,
+    check_videotoolbox,
     find_video_files,
     match_video,
     generate_preview,
@@ -377,6 +378,36 @@ with st.sidebar:
     quality = quality_options[quality_label]
     st.caption("CRF 越低画质越高，18 几乎无损")
 
+    st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-section-label">编码方式</div>', unsafe_allow_html=True)
+
+    has_gpu = check_videotoolbox()
+    encoder_options = {"cpu": "🖥️ CPU (libx264)", "gpu": "⚡ GPU (VideoToolbox)"}
+
+    if has_gpu:
+        encoder_hints = {
+            "cpu": "画质最精准，速度较慢",
+            "gpu": "速度快 3-5 倍，画质略低",
+        }
+        saved_encoder = st.session_state.get("encoder", "cpu")
+        encoder = st.radio(
+            "编码器",
+            list(encoder_options.keys()),
+            format_func=lambda k: encoder_options[k],
+            index=list(encoder_options.keys()).index(saved_encoder) if saved_encoder in encoder_options else 0,
+            key="encoder",
+            label_visibility="collapsed",
+        )
+        st.caption(encoder_hints[encoder])
+    else:
+        encoder = "cpu"
+        st.markdown(
+            '<div style="font-size:0.82rem;color:#64748b;">🖥️ CPU (libx264)<br>'
+            '<span style="color:#94a3b8;font-size:0.78rem;">GPU 不可用（FFmpeg 未编译 VideoToolbox）</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
     st.divider()
 
     # ── 预设管理 ──
@@ -425,6 +456,7 @@ save_last_used({
     "opacity": opacity,
     "font_color": font_color,
     "quality_label": quality_label,
+    "encoder": encoder,
 })
 
 
@@ -716,6 +748,7 @@ with left_col:
                                 quality=quality,
                                 custom_x=custom_x,
                                 custom_y=custom_y,
+                                encoder=encoder,
                             )
                             done += 1
                             progress.progress(done / total)
