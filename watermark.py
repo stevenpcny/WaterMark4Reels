@@ -251,6 +251,7 @@ def add_watermark(
     custom_x: Optional[int] = None,
     custom_y: Optional[int] = None,
     encoder: str = "cpu",
+    volume: float = 1.0,
 ) -> tuple:
     """给视频添加文字水印（Pillow 生成水印层，FFmpeg overlay 合成）"""
     size = _get_video_size(input_path)
@@ -264,12 +265,16 @@ def add_watermark(
     try:
         # 编码器参数
         if encoder == "gpu" and check_videotoolbox():
-            # Apple VideoToolbox：用码率控制，GPU 加速
             bitrate = _crf_to_bitrate(quality, w, h)
             codec_args = ["-c:v", "h264_videotoolbox", "-b:v", bitrate]
         else:
-            # libx264：CPU 精确质量控制
             codec_args = ["-c:v", "libx264", "-crf", str(quality), "-preset", "slow"]
+
+        # 音量滤镜（volume=1.0 表示原始音量，不做任何处理）
+        if abs(volume - 1.0) > 0.01:
+            audio_args = ["-af", f"volume={volume:.2f}"]
+        else:
+            audio_args = ["-c:a", "copy"]
 
         cmd = [
             _ffmpeg_bin(),
@@ -277,7 +282,7 @@ def add_watermark(
             "-i", overlay_path,
             "-filter_complex", "overlay=0:0",
             *codec_args,
-            "-c:a", "copy",
+            *audio_args,
             "-y",
             str(output_path),
         ]
@@ -291,6 +296,36 @@ def add_watermark(
         return False, str(e)
     finally:
         os.unlink(overlay_path)
+
+
+def generate_audio_preview(
+    input_path: str,
+    output_audio: str,
+    volume: float = 1.0,
+    duration: int = 8,
+) -> tuple:
+    """提取视频前 N 秒音频并调整音量，用于试听。返回 (True, "") 或 (False, 错误信息)"""
+    try:
+        audio_filter = f"volume={volume:.2f}"
+        cmd = [
+            _ffmpeg_bin(),
+            "-i", str(input_path),
+            "-t", str(duration),
+            "-af", audio_filter,
+            "-vn",
+            "-ar", "44100",
+            "-ac", "2",
+            "-y",
+            str(output_audio),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return False, _friendly_error(result.stderr)
+        return True, ""
+    except subprocess.TimeoutExpired:
+        return False, "试听生成超时"
+    except Exception as e:
+        return False, str(e)
 
 
 def _crf_to_bitrate(crf: int, width: int, height: int) -> str:

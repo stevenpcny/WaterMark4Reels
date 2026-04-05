@@ -15,6 +15,8 @@ DEFAULT_SETTINGS = {
     "opacity": 0.7,
     "font_color": "white",
     "quality_label": "近似无损 (CRF 18) - 推荐",
+    "encoder": "cpu",
+    "volume": 1.0,
 }
 
 DEFAULT_PRESETS = {

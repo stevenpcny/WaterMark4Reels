@@ -13,6 +13,7 @@ from watermark import (
     find_video_files,
     match_video,
     generate_preview,
+    generate_audio_preview,
     get_available_fonts,
     parse_mapping,
     sanitize_filename,
@@ -410,6 +411,27 @@ with st.sidebar:
 
     st.divider()
 
+    # ── 音量调整 ──
+    st.markdown('<div class="sidebar-section-label">音量调整</div>', unsafe_allow_html=True)
+    volume = st.slider(
+        "输出音量",
+        min_value=0.5,
+        max_value=3.0,
+        step=0.1,
+        key="volume",
+        format="%.1fx",
+    )
+    if volume < 1.0:
+        st.caption(f"🔉 降低至原始音量的 {volume:.0%}")
+    elif volume == 1.0:
+        st.caption("🔊 原始音量（不做调整）")
+    elif volume <= 1.5:
+        st.caption(f"🔊 提升至原始音量的 {volume:.0%}")
+    else:
+        st.caption(f"🔊 大幅提升至原始音量的 {volume:.0%}，注意失真风险")
+
+    st.divider()
+
     # ── 预设管理 ──
     st.markdown('<div class="sidebar-section-label">预设管理</div>', unsafe_allow_html=True)
     all_data = load_all()
@@ -457,6 +479,7 @@ save_last_used({
     "font_color": font_color,
     "quality_label": quality_label,
     "encoder": encoder,
+    "volume": volume,
 })
 
 
@@ -749,6 +772,7 @@ with left_col:
                                 custom_x=custom_x,
                                 custom_y=custom_y,
                                 encoder=encoder,
+                                volume=volume,
                             )
                             done += 1
                             progress.progress(done / total)
@@ -811,6 +835,34 @@ with right_col:
     st.markdown('<div class="ui-card-title">👁️ 水印预览</div>', unsafe_allow_html=True)
 
     auto_preview = st.session_state.pop("auto_preview", False)
+
+    # ── 音量试听 ──
+    if videos:
+        first_video_for_audio = sorted(videos.values(), key=lambda p: p.stem)[0]
+        st.markdown('<div class="ui-card-title">🔊 音量试听</div>', unsafe_allow_html=True)
+        st.caption(f"当前音量：{volume:.1f}x — 截取前 8 秒试听")
+        if st.button("🎧 生成试听片段", use_container_width=True, key="audio_preview_btn"):
+            with st.spinner("生成试听中…"):
+                old_audio = st.session_state.get("audio_preview_path")
+                if old_audio and os.path.isfile(old_audio):
+                    try:
+                        os.unlink(old_audio)
+                    except Exception:
+                        pass
+                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                    audio_path = tmp.name
+                ok, err = generate_audio_preview(
+                    str(first_video_for_audio), audio_path, volume=volume
+                )
+                if ok:
+                    st.session_state["audio_preview_path"] = audio_path
+                else:
+                    st.error(f"试听生成失败：{err}")
+
+        if "audio_preview_path" in st.session_state and os.path.isfile(st.session_state["audio_preview_path"]):
+            st.audio(st.session_state["audio_preview_path"], format="audio/mp3")
+
+        st.divider()
 
     if videos:
         first_video = sorted(videos.values(), key=lambda p: p.stem)[0]
