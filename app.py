@@ -278,15 +278,20 @@ if not check_ffmpeg():
 
 
 def pick_folder() -> str:
-    script = (
-        'tell application "System Events" to activate\n'
-        'set f to choose folder\n'
-        'POSIX path of f'
-    )
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-    if result.returncode != 0:
+    try:
+        script = (
+            'tell application "System Events" to activate\n'
+            'set f to choose folder\n'
+            'POSIX path of f'
+        )
+        result = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+    except Exception:
         return ""
-    return result.stdout.strip()
 
 
 # ══════════════════════════════════════
@@ -413,8 +418,8 @@ with st.sidebar:
 save_last_used({
     "watermark_text": watermark_text,
     "position": position,
-    "custom_x": custom_x or st.session_state.get("custom_x", 100),
-    "custom_y": custom_y or st.session_state.get("custom_y", 100),
+    "custom_x": custom_x if custom_x is not None else st.session_state.get("custom_x", 100),
+    "custom_y": custom_y if custom_y is not None else st.session_state.get("custom_y", 100),
     "font": selected_font,
     "font_size": font_size,
     "opacity": opacity,
