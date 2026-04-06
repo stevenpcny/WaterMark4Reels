@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🎬 Reels 批量打水印</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --accent:#5b6ef5;--accent2:#8b5cf6;
+  --bg:#f4f6fb;--card:#fff;
+  --border:#e8ecf3;--text:#1e293b;--muted:#64748b;--faint:#94a3b8;
+  --green:#16a34a;--green-bg:#f0fdf4;--green-border:#bbf7d0;
+  --yellow-bg:#fef9c3;--yellow-border:#fde047;--yellow-text:#78350f;
+  --red:#dc2626;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px}
+
+/* layout */
+.header{padding:1.4rem 2rem .8rem;border-bottom:1px solid var(--border);background:white}
+.header h1{font-size:1.6rem;font-weight:800;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.header p{color:var(--faint);font-size:.85rem;margin-top:3px}
+.main{display:grid;grid-template-columns:1fr 320px;gap:1.2rem;padding:1.2rem 1.5rem;max-width:1280px;margin:0 auto}
+@media(max-width:900px){.main{grid-template-columns:1fr}}
+
+/* card */
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1.2rem 1.4rem;box-shadow:0 1px 4px rgba(0,0,0,.04);margin-bottom:1rem}
+.card-title{font-size:.7rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin-bottom:.8rem}
+
+/* buttons */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:.5rem 1rem;border-radius:8px;font-size:.875rem;font-weight:500;cursor:pointer;border:none;transition:all .2s}
+.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:white;box-shadow:0 4px 14px rgba(91,110,245,.3);width:100%;padding:.7rem}
+.btn-primary:hover{box-shadow:0 6px 20px rgba(91,110,245,.45);transform:translateY(-1px)}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.btn-secondary{background:white;border:1px solid var(--border);color:var(--muted)}
+.btn-secondary:hover{border-color:var(--accent);color:var(--accent);background:#f5f3ff}
+.btn-sm{padding:.3rem .7rem;font-size:.78rem}
+.btn-download{background:var(--green-bg);border:1px solid var(--green-border);color:var(--green);font-weight:600}
+
+/* inputs */
+label{display:block;font-size:.8rem;font-weight:500;color:var(--muted);margin-bottom:4px}
+input[type=text],textarea,select{width:100%;padding:.45rem .7rem;border:1px solid var(--border);border-radius:8px;font-size:.875rem;background:white;color:var(--text);outline:none;transition:border-color .2s,box-shadow .2s}
+input[type=text]:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(91,110,245,.12)}
+textarea{resize:vertical;font-family:monospace;font-size:.82rem}
+input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:.6rem}
+
+/* drop zone */
+.drop-zone{border:2px dashed #c7d2fe;border-radius:12px;padding:2rem;text-align:center;background:linear-gradient(135deg,#fafbff,#f5f3ff);cursor:pointer;transition:all .2s;position:relative}
+.drop-zone:hover,.drop-zone.dragover{border-color:var(--accent);background:linear-gradient(135deg,#f0f0ff,#ede9fe)}
+.drop-zone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer}
+.drop-zone .icon{font-size:2rem;margin-bottom:.5rem}
+.drop-zone .hint{color:var(--faint);font-size:.82rem;margin-top:4px}
+
+/* status */
+.status-ok{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--green-bg);border:1px solid var(--green-border);border-radius:8px;color:var(--green);font-weight:500;font-size:.875rem}
+.status-warn{padding:8px 12px;background:var(--yellow-bg);border:1px solid var(--yellow-border);border-radius:8px;color:var(--yellow-text);font-size:.875rem}
+.status-info{padding:8px 12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;color:#1d4ed8;font-size:.875rem}
+
+/* table */
+table{width:100%;border-collapse:collapse;font-size:.82rem}
+th{background:#f8fafc;color:var(--muted);font-weight:600;padding:6px 10px;text-align:left;border-bottom:1px solid var(--border)}
+td{padding:6px 10px;border-bottom:1px solid #f1f5f9}
+tr:last-child td{border-bottom:none}
+
+/* progress */
+.progress-bar{height:8px;background:#e8ecf3;border-radius:999px;overflow:hidden;margin:.5rem 0}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:999px;transition:width .3s}
+
+/* preview canvas */
+#previewCanvas{width:100%;border-radius:10px;border:1px solid var(--border);display:none}
+.preview-empty{aspect-ratio:9/16;max-height:300px;background:#f8fafc;border-radius:12px;border:2px dashed var(--border);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--faint);font-size:.875rem}
+
+/* range + label row */
+.range-row{display:flex;align-items:center;gap:.6rem}
+.range-row input{flex:1}
+.range-val{min-width:38px;text-align:right;font-weight:600;color:var(--accent);font-size:.85rem}
+
+/* loader overlay */
+#loader{position:fixed;inset:0;background:rgba(255,255,255,.9);display:none;flex-direction:column;align-items:center;justify-content:center;gap:1rem;z-index:9999}
+#loader .spinner{width:40px;height:40px;border:3px solid #e8ecf3;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#loader p{color:var(--muted);font-size:.9rem}
+
+/* toast */
+#toast{position:fixed;bottom:1.5rem;right:1.5rem;padding:10px 16px;border-radius:10px;background:#1e293b;color:white;font-size:.875rem;font-weight:500;transform:translateY(20px);opacity:0;transition:all .3s;z-index:9999;pointer-events:none}
+#toast.show{transform:translateY(0);opacity:1}
+</style>
+</head>
+<body>
+
+<div id="loader"><div class="spinner"></div><p id="loaderText">加载 FFmpeg 中，首次约需 10-20 秒…</p></div>
+<div id="toast"></div>
+
+<!-- 全页拖拽蒙层 -->
+<div id="dropOverlay" style="display:none;position:fixed;inset:0;z-index:99999;background:rgba(91,110,245,.6);backdrop-filter:blur(8px);align-items:center;justify-content:center;flex-direction:column;gap:16px;pointer-events:none">
+  <div style="font-size:64px;animation:bounce .6s infinite alternate">📥</div>
+  <div style="font-size:24px;font-weight:700;color:white">松手即可上传视频</div>
+  <div style="font-size:14px;color:rgba(255,255,255,.8)">支持 mp4 / mov / avi / mkv / webm</div>
+</div>
+<style>@keyframes bounce{from{transform:translateY(0)}to{transform:translateY(-16px)}}</style>
+
+<div class="header">
+  <h1>🎬 Reels 批量打水印</h1>
+  <p>批量添加文字水印 · 自动重命名 · 所有处理在浏览器本地完成，视频不上传服务器</p>
+</div>
+
+<div class="main">
+
+<!-- ═══ 左栏 ═══ -->
+<div>
+
+  <!-- ① 上传 -->
+  <div class="card">
+    <div class="card-title">① 上传视频</div>
+    <div class="drop-zone" id="dropZone">
+      <input type="file" id="fileInput" accept="video/*" multiple>
+      <div class="icon">🎬</div>
+      <div style="font-weight:600;color:#4338ca">拖拽或点击选择视频文件</div>
+      <div class="hint">支持 mp4 / mov / avi / mkv / webm · 可多选</div>
+    </div>
+    <div id="fileStatus" style="margin-top:.6rem;display:none"></div>
+    <div id="fileList" style="margin-top:.5rem;font-size:.8rem;color:var(--muted)"></div>
+  </div>
+
+  <!-- ② 映射数据 -->
+  <div class="card">
+    <div class="card-title">② 粘贴 Google Sheets 数据</div>
+    <p style="font-size:.8rem;color:var(--muted);margin-bottom:.6rem">从 Google Sheets 复制两列（序号/关键词 + 新文件名），直接粘贴</p>
+    <textarea id="mappingInput" rows="6" placeholder="1&#9;我的第一个Reel&#10;2&#9;旅行vlog第二集&#10;3&#9;美食探店合集"></textarea>
+    <div id="mappingStatus" style="margin-top:.5rem;display:none"></div>
+  </div>
+
+  <!-- ③ 映射预览 -->
+  <div class="card" id="mappingPreviewCard" style="display:none">
+    <div class="card-title">③ 映射预览</div>
+    <div style="overflow-x:auto"><table id="mappingTable"><thead><tr><th>关键词</th><th>原文件</th><th>输出文件名</th><th>状态</th></tr></thead><tbody></tbody></table></div>
+    <div id="mappingMetrics" style="display:flex;gap:.6rem;margin-top:.8rem"></div>
+  </div>
+
+  <!-- ④ 处理 -->
+  <div class="card" id="processCard" style="display:none">
+    <div class="card-title">④ 开始处理</div>
+    <div id="processInfo" class="status-info" style="margin-bottom:.8rem;font-size:.82rem"></div>
+    <div id="progressWrap" style="display:none">
+      <div id="progressLabel" style="font-size:.82rem;color:var(--muted);margin-bottom:4px"></div>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+    </div>
+    <button class="btn btn-primary" id="processBtn">🚀 开始处理</button>
+  </div>
+
+  <!-- ⑤ 结果 -->
+  <div class="card" id="resultsCard" style="display:none">
+    <div class="card-title">处理结果</div>
+    <div id="resultsMetrics" style="display:flex;gap:.6rem;margin-bottom:.8rem"></div>
+    <div id="resultsList"></div>
+  </div>
+
+</div>
+
+<!-- ═══ 右栏 ═══ -->
+<div>
+
+  <!-- 水印设置 -->
+  <div class="card">
+    <div class="card-title">水印设置</div>
+    <div style="margin-bottom:.7rem">
+      <label>水印文字</label>
+      <input type="text" id="watermarkText" placeholder="@YourAccount">
+    </div>
+    <div style="margin-bottom:.7rem">
+      <label>水印位置</label>
+      <select id="position">
+        <option>右下</option><option>左下</option><option>右上</option><option>左上</option><option>居中</option><option>自定义</option>
+      </select>
+    </div>
+    <div id="customXYWrap" style="display:none;margin-bottom:.7rem">
+      <div class="form-row">
+        <div><label>X 坐标（px）</label><input type="text" id="customX" value="100"></div>
+        <div><label>Y 坐标（px）</label><input type="text" id="customY" value="100"></div>
+      </div>
+    </div>
+    <div class="form-row" style="margin-bottom:.7rem">
+      <div>
+        <label>字体颜色</label>
+        <select id="fontColor">
+          <option value="white">⬜ 白色</option>
+          <option value="black">⬛ 黑色</option>
+          <option value="yellow">🟨 黄色</option>
+          <option value="red">🟥 红色</option>
+        </select>
+      </div>
+      <div>
+        <label>字体粗细</label>
+        <select id="fontWeight">
+          <option value="bold">粗体</option>
+          <option value="normal">常规</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-bottom:.7rem">
+      <label>字号：<span id="fontSizeVal">28</span>px</label>
+      <div class="range-row"><input type="range" id="fontSize" min="12" max="120" value="28"><span class="range-val" id="fontSizeVal2">28px</span></div>
+    </div>
+    <div style="margin-bottom:.4rem">
+      <label>透明度：<span id="opacityVal">70</span>%</label>
+      <div class="range-row"><input type="range" id="opacity" min="10" max="100" value="70"><span class="range-val" id="opacityVal2">70%</span></div>
+    </div>
+  </div>
+
+  <!-- 画质 + 音量 -->
+  <div class="card">
+    <div class="card-title">画质 & 音量</div>
+    <div style="margin-bottom:.7rem">
+      <label>输出画质</label>
+      <select id="quality">
+        <option value="18">近似无损 (CRF 18) — 推荐</option>
+        <option value="20">高画质 (CRF 20)</option>
+        <option value="23">标准 (CRF 23)</option>
+        <option value="28">较小文件 (CRF 28)</option>
+      </select>
+      <p style="font-size:.75rem;color:var(--faint);margin-top:3px">CRF 越低画质越高，18 几乎无损</p>
+    </div>
+    <div>
+      <label>输出音量：<span id="volumeVal">1.0x</span></label>
+      <div class="range-row"><input type="range" id="volume" min="5" max="30" value="10"><span class="range-val" id="volumeVal2">1.0x</span></div>
+      <p id="volumeHint" style="font-size:.75rem;color:var(--faint);margin-top:3px">🔊 原始音量（不做调整）</p>
+    </div>
+  </div>
+
+  <!-- 预览 -->
+  <div class="card">
+    <div class="card-title">👁️ 水印预览</div>
+    <canvas id="previewCanvas"></canvas>
+    <div class="preview-empty" id="previewEmpty"><div style="font-size:2rem">🎬</div><div>上传视频后点击预览</div></div>
+    <button class="btn btn-secondary" id="previewBtn" style="width:100%;margin-top:.6rem" disabled>🔄 刷新预览</button>
+    <p id="previewCaption" style="text-align:center;font-size:.75rem;color:var(--faint);margin-top:4px"></p>
+  </div>
+
+</div>
+</div>
+
+<script type="module">
+import { FFmpeg } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
+import { fetchFile, toBlobURL } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
+
+// ── State ──────────────────────────────────────────────────
+let uploadedFiles = {};   // { stem: File }
+let mapping = {};         // { seq: newName }
+let ffmpeg = null;
+let ffmpegLoading = false;
+
+const S = {
+  get watermarkText(){ return $('watermarkText').value.trim() },
+  get position(){ return $('position').value },
+  get customX(){ return parseInt($('customX').value)||100 },
+  get customY(){ return parseInt($('customY').value)||100 },
+  get fontColor(){ return $('fontColor').value },
+  get fontWeight(){ return $('fontWeight').value },
+  get fontSize(){ return parseInt($('fontSize').value)||28 },
+  get opacity(){ return parseInt($('opacity').value)/100 },
+  get quality(){ return parseInt($('quality').value)||18 },
+  get volume(){ return parseInt($('volume').value)/10 },
+};
+
+function $(id){ return document.getElementById(id) }
+
+// ── FFmpeg ─────────────────────────────────────────────────
+async function getFFmpeg() {
+  if (ffmpeg) return ffmpeg;
+  if (ffmpegLoading) { await new Promise(r => setTimeout(r, 200)); return getFFmpeg(); }
+  ffmpegLoading = true;
+  showLoader('加载 FFmpeg 中，首次约需 10-20 秒…');
+  try {
+    ffmpeg = new FFmpeg();
+    const base = 'https://unpkg.com/@ffmpeg/core-mt@0.12.6/dist/esm';
+    await ffmpeg.load({
+      coreURL:   await toBlobURL(`${base}/ffmpeg-core.js`,     'text/javascript'),
+      wasmURL:   await toBlobURL(`${base}/ffmpeg-core.wasm`,   'application/wasm'),
+      workerURL: await toBlobURL(`${base}/ffmpeg-core.worker.js`, 'text/javascript'),
+    });
+  } catch(e) {
+    // fallback to single-thread
+    ffmpeg = new FFmpeg();
+    const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${base}/ffmpeg-core.js`,   'text/javascript'),
+      wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
+    });
+  }
+  hideLoader();
+  ffmpegLoading = false;
+  return ffmpeg;
+}
+
+// ── Watermark Canvas ───────────────────────────────────────
+function makeWatermarkOverlay(w, h, text, position, fontSize, opacity, color, fontWeight, customX, customY) {
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+
+  const colorMap = { white:'#ffffff', black:'#000000', yellow:'#ffe600', red:'#dc1e1e' };
+  ctx.font = `${fontWeight} ${fontSize}px -apple-system, sans-serif`;
+  ctx.fillStyle = colorMap[color] || '#ffffff';
+  ctx.globalAlpha = opacity;
+
+  const pad = Math.round(w * 0.025);
+  const metrics = ctx.measureText(text);
+  const tw = metrics.width;
+  const th = fontSize;
+
+  let x, y;
+  switch(position) {
+    case '右下': x = w - tw - pad; y = h - pad; break;
+    case '左下': x = pad;           y = h - pad; break;
+    case '右上': x = w - tw - pad; y = th + pad; break;
+    case '左上': x = pad;           y = th + pad; break;
+    case '居中': x = (w - tw)/2;   y = (h + th)/2; break;
+    case '自定义': x = customX;    y = customY + th; break;
+    default:     x = w - tw - pad; y = h - pad;
+  }
+
+  // subtle shadow for readability
+  ctx.shadowColor = color === 'white' ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.3)';
+  ctx.shadowBlur = 4;
+  ctx.fillText(text, x, y);
+  return canvas;
+}
+
+async function canvasToPNG(canvas) {
+  return new Promise(resolve => canvas.toBlob(b => b.arrayBuffer().then(resolve), 'image/png'));
+}
+
+// ── Video helpers ──────────────────────────────────────────
+function getVideoDimensions(file) {
+  return new Promise((resolve, reject) => {
+    const vid = document.createElement('video');
+    vid.preload = 'metadata';
+    vid.onloadedmetadata = () => {
+      URL.revokeObjectURL(vid.src);
+      resolve({ w: vid.videoWidth, h: vid.videoHeight });
+    };
+    vid.onerror = reject;
+    vid.src = URL.createObjectURL(file);
+  });
+}
+
+function getVideoFrame(file) {
+  return new Promise(resolve => {
+    const vid = document.createElement('video');
+    const canvas = document.createElement('canvas');
+    vid.onloadeddata = () => {
+      vid.currentTime = Math.min(1, vid.duration * 0.1);
+    };
+    vid.onseeked = () => {
+      canvas.width = vid.videoWidth; canvas.height = vid.videoHeight;
+      canvas.getContext('2d').drawImage(vid, 0, 0);
+      URL.revokeObjectURL(vid.src);
+      resolve(canvas);
+    };
+    vid.onerror = () => resolve(null);
+    vid.src = URL.createObjectURL(file);
+  });
+}
+
+// ── Matching ───────────────────────────────────────────────
+function matchVideo(seq, files) {
+  const s = seq.toLowerCase();
+  const entries = Object.entries(files);
+  // exact
+  for(const [stem, f] of entries) if(stem.toLowerCase() === s) return { stem, f };
+  // prefix
+  for(const [stem, f] of entries) if(stem.toLowerCase().startsWith(s)) return { stem, f };
+  // contains
+  const re = new RegExp(`(^|[^\\d])${s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}([^\\d]|$)`,'i');
+  for(const [stem, f] of entries) if(re.test(stem)) return { stem, f };
+  return null;
+}
+
+function sanitize(name) {
+  return name.replace(/[\/\\:*?"<>|]/g, '-').trim();
+}
+
+function parseTSV(text) {
+  const m = {};
+  for(const line of text.trim().split('\n')) {
+    const parts = line.split(/\t|,/);
+    if(parts.length >= 2) {
+      const seq = parts[0].trim();
+      const name = parts.slice(1).join(' ').trim();
+      if(seq && name) m[seq] = name;
+    }
+  }
+  return m;
+}
+
+// ── Preview ────────────────────────────────────────────────
+async function renderPreview() {
+  const files = Object.values(uploadedFiles);
+  if(!files.length) return;
+  const file = files[0];
+  const frame = await getVideoFrame(file);
+  if(!frame) return;
+
+  const canvas = $('previewCanvas');
+  const overlay = makeWatermarkOverlay(
+    frame.width, frame.height, S.watermarkText || '水印预览',
+    S.position, S.fontSize, S.opacity, S.fontColor, S.fontWeight, S.customX, S.customY
+  );
+  canvas.width = frame.width; canvas.height = frame.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(frame, 0, 0);
+  ctx.drawImage(overlay, 0, 0);
+
+  canvas.style.display = 'block';
+  $('previewEmpty').style.display = 'none';
+  $('previewCaption').textContent = `${file.name} · 字号 ${S.fontSize} · 透明度 ${Math.round(S.opacity*100)}%`;
+}
+
+// ── Process ────────────────────────────────────────────────
+async function processVideo(file, outputName, onProgress) {
+  const ff = await getFFmpeg();
+  const { w, h } = await getVideoDimensions(file);
+  const overlay = makeWatermarkOverlay(w, h, S.watermarkText, S.position,
+    S.fontSize, S.opacity, S.fontColor, S.fontWeight, S.customX, S.customY);
+  const overlayBuf = await canvasToPNG(overlay);
+
+  const inputName = 'input_' + Date.now() + '.' + (file.name.split('.').pop() || 'mp4');
+  const outName   = 'output_' + Date.now() + '.mp4';
+
+  ff.on('progress', ({ progress }) => onProgress(Math.min(progress, 1)));
+
+  await ff.writeFile(inputName,  await fetchFile(file));
+  await ff.writeFile('overlay.png', new Uint8Array(overlayBuf));
+
+  const vol = S.volume;
+  const audioArgs = Math.abs(vol - 1.0) > 0.05
+    ? ['-af', `volume=${vol.toFixed(2)}`]
+    : ['-c:a', 'copy'];
+
+  await ff.exec([
+    '-i', inputName,
+    '-i', 'overlay.png',
+    '-filter_complex', 'overlay=0:0',
+    '-c:v', 'libx264',
+    '-crf', String(S.quality),
+    '-preset', 'fast',
+    ...audioArgs,
+    '-y', outName,
+  ]);
+
+  const data = await ff.readFile(outName);
+  await ff.deleteFile(inputName).catch(()=>{});
+  await ff.deleteFile('overlay.png').catch(()=>{});
+  await ff.deleteFile(outName).catch(()=>{});
+
+  return new Blob([data.buffer], { type:'video/mp4' });
+}
+
+// ── UI helpers ─────────────────────────────────────────────
+function showLoader(msg){ $('loaderText').textContent = msg; $('loader').style.display='flex' }
+function hideLoader(){ $('loader').style.display='none' }
+
+function toast(msg, ms=3000) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), ms);
+}
+
+function metricChip(label, val, color='#5b6ef5') {
+  return `<div style="background:white;border:1px solid var(--border);border-radius:8px;padding:6px 14px;text-align:center;min-width:70px">
+    <div style="font-size:1.2rem;font-weight:700;color:${color}">${val}</div>
+    <div style="font-size:.72rem;color:var(--faint)">${label}</div>
+  </div>`;
+}
+
+function updateMappingPreview() {
+  const rows = Object.entries(mapping);
+  if(!rows.length) { $('mappingPreviewCard').style.display='none'; $('processCard').style.display='none'; return; }
+
+  const tbody = $('mappingTable').querySelector('tbody');
+  tbody.innerHTML = '';
+  let matched = 0;
+  for(const [seq, name] of rows) {
+    const hit = matchVideo(seq, uploadedFiles);
+    const ok = !!hit;
+    if(ok) matched++;
+    const clean = sanitize(name);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${seq}</td><td>${ok ? hit.f.name : `<span style="color:var(--faint)">(未找到)</span>`}</td>
+      <td style="color:#4338ca;font-size:.78rem">水印-${seq}-${clean}.mp4</td>
+      <td>${ok ? '✅':'❌'}</td>`;
+    tbody.appendChild(tr);
+  }
+
+  $('mappingMetrics').innerHTML =
+    metricChip('总数', rows.length) +
+    metricChip('已匹配', matched, 'var(--green)') +
+    metricChip('未匹配', rows.length - matched, rows.length - matched > 0 ? 'var(--red)' : 'var(--green)');
+
+  $('mappingPreviewCard').style.display = matched > 0 ? 'block' : 'none';
+
+  if(matched > 0) {
+    $('processCard').style.display = 'block';
+    $('processInfo').textContent = `将处理 ${matched} 个视频 · CRF ${S.quality} · 音量 ${S.volume.toFixed(1)}x`;
+    $('processBtn').textContent = `🚀 开始处理 ${matched} 个视频`;
+    $('processBtn').disabled = false;
+  } else {
+    $('processCard').style.display = 'none';
+  }
+}
+
+// ── Event listeners ────────────────────────────────────────
+
+// File upload
+function handleFiles(files) {
+  const valid = Array.from(files).filter(f => f.type.startsWith('video/') || /\.(mp4|mov|avi|mkv|webm)$/i.test(f.name));
+  if(!valid.length) { toast('没有找到有效的视频文件'); return; }
+  for(const f of valid) {
+    const stem = f.name.replace(/\.[^.]+$/, '');
+    uploadedFiles[stem] = f;
+  }
+  const count = Object.keys(uploadedFiles).length;
+  $('fileStatus').style.display = 'block';
+  $('fileStatus').innerHTML = `<div class="status-ok">✅ 已加载 ${count} 个视频</div>`;
+  $('fileList').innerHTML = Object.keys(uploadedFiles).map(s=>`<span style="display:inline-block;padding:2px 8px;background:#f1f5f9;border-radius:4px;margin:2px;font-size:.75rem">${s}</span>`).join('');
+  $('previewBtn').disabled = false;
+  updateMappingPreview();
+  renderPreview();
+}
+
+$('fileInput').addEventListener('change', e => handleFiles(e.target.files));
+
+const dz = $('dropZone');
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('dragover'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('dragover'); handleFiles(e.dataTransfer.files); });
+
+// Global drag overlay
+let dc = 0;
+document.addEventListener('dragenter', e => { if(e.dataTransfer?.types.includes('Files')){ if(++dc===1) $('dropOverlay').style.display='flex'; }});
+document.addEventListener('dragleave', () => { if(--dc<=0){ dc=0; $('dropOverlay').style.display='none'; }});
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => { dc=0; $('dropOverlay').style.display='none'; });
+
+// Mapping input
+$('mappingInput').addEventListener('input', () => {
+  const text = $('mappingInput').value.trim();
+  if(!text) { mapping={}; $('mappingPreviewCard').style.display='none'; return; }
+  mapping = parseTSV(text);
+  const count = Object.keys(mapping).length;
+  if(count) {
+    $('mappingStatus').style.display = 'block';
+    $('mappingStatus').innerHTML = `<div class="status-ok">✅ 解析到 ${count} 条映射</div>`;
+  }
+  updateMappingPreview();
+});
+
+// Position toggle
+$('position').addEventListener('change', () => {
+  $('customXYWrap').style.display = S.position === '自定义' ? 'block' : 'none';
+  renderPreview();
+});
+
+// Settings → re-render preview
+['watermarkText','fontColor','fontWeight','customX','customY'].forEach(id =>
+  $(id)?.addEventListener('input', renderPreview)
+);
+
+// Sliders
+function syncSlider(id, valId1, valId2, fmt) {
+  const el = $(id);
+  const update = () => {
+    const v = fmt(el.value);
+    $(valId1).textContent = v; $(valId2).textContent = v;
+    renderPreview();
+  };
+  el.addEventListener('input', update);
+  update();
+}
+syncSlider('fontSize', 'fontSizeVal', 'fontSizeVal2', v => `${v}px`);
+syncSlider('opacity', 'opacityVal', 'opacityVal2', v => `${v}%`);
+
+$('volume').addEventListener('input', () => {
+  const v = S.volume;
+  $('volumeVal').textContent = v.toFixed(1)+'x';
+  $('volumeVal2').textContent = v.toFixed(1)+'x';
+  const hint = v < 1 ? `🔉 降低至原始的 ${Math.round(v*100)}%`
+              : v === 1 ? '🔊 原始音量（不做调整）'
+              : v <= 1.5 ? `🔊 提升至原始的 ${Math.round(v*100)}%`
+              : `🔊 大幅提升至 ${Math.round(v*100)}%，注意失真`;
+  $('volumeHint').textContent = hint;
+  updateMappingPreview();
+});
+
+// Preview button
+$('previewBtn').addEventListener('click', renderPreview);
+
+// Process
+$('processBtn').addEventListener('click', async () => {
+  const toProcess = [];
+  for(const [seq, name] of Object.entries(mapping)) {
+    const hit = matchVideo(seq, uploadedFiles);
+    if(hit) toProcess.push({ seq, name, file: hit.f });
+  }
+  if(!toProcess.length) return;
+
+  $('processBtn').disabled = true;
+  $('progressWrap').style.display = 'block';
+  $('resultsCard').style.display = 'none';
+
+  const results = [];
+  for(let i=0; i<toProcess.length; i++) {
+    const { seq, name, file } = toProcess[i];
+    const clean = sanitize(name);
+    const outName = `水印-${seq}-${clean}.mp4`;
+    $('progressLabel').textContent = `处理中 (${i+1}/${toProcess.length})：${file.name}`;
+    $('progressFill').style.width = `${(i/toProcess.length)*100}%`;
+
+    try {
+      showLoader(`处理中 (${i+1}/${toProcess.length})：${file.name}`);
+      const blob = await processVideo(file, outName, (p) => {
+        $('progressFill').style.width = `${((i + p)/toProcess.length)*100}%`;
+        $('loaderText').textContent = `处理中 (${i+1}/${toProcess.length})：${Math.round(p*100)}%`;
+      });
+      hideLoader();
+      const url = URL.createObjectURL(blob);
+      results.push({ outName, url, ok: true, size: (blob.size/1024/1024).toFixed(1) });
+    } catch(e) {
+      hideLoader();
+      results.push({ outName, url:null, ok:false, error:String(e) });
+    }
+  }
+
+  $('progressFill').style.width = '100%';
+  $('progressLabel').textContent = '处理完成！';
+
+  // Show results
+  const ok = results.filter(r=>r.ok).length;
+  $('resultsMetrics').innerHTML =
+    metricChip('✅ 成功', ok, 'var(--green)') +
+    metricChip('❌ 失败', results.length-ok, results.length-ok>0?'var(--red)':'var(--green)');
+
+  $('resultsList').innerHTML = results.map(r => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f1f5f9">
+      <div>
+        <div style="font-weight:500;font-size:.85rem">${r.outName}</div>
+        <div style="font-size:.75rem;color:var(--faint)">${r.ok ? `${r.size} MB` : r.error}</div>
+      </div>
+      ${r.ok ? `<a href="${r.url}" download="${r.outName}" class="btn btn-download btn-sm">⬇️ 下载</a>` : '<span style="color:var(--red);font-size:.8rem">失败</span>'}
+    </div>`).join('');
+
+  $('resultsCard').style.display = 'block';
+  $('processBtn').disabled = false;
+
+  if(ok) toast(`🎉 处理完成，${ok} 个视频可下载`);
+});
+
+// init volume display
+$('volume').dispatchEvent(new Event('input'));
+
+</script>
+</body>
+</html>
