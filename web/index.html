@@ -384,12 +384,29 @@ function sanitize(name) {
 function parseTSV(text) {
   const m = {};
   for(const line of text.trim().split('\n')) {
-    const parts = line.split(/\t|,/);
-    if(parts.length >= 2) {
-      const seq = parts[0].trim();
-      const name = parts.slice(1).join(' ').trim();
-      if(seq && name) m[seq] = name;
+    if(!line.trim()) continue;
+    let seq, name;
+    if(line.includes('\t')) {
+      // Tab 分隔（Google Sheets 直接复制）
+      const parts = line.split('\t');
+      seq = parts[0].trim();
+      name = parts.slice(1).join('\t').trim();
+    } else if(/^.+?[,，、]\s*.+/.test(line)) {
+      // 逗号分隔
+      const idx = line.search(/[,，、]/);
+      seq = line.slice(0, idx).trim();
+      name = line.slice(idx + 1).trim();
+    } else if(/^\S+[\.\)。）]\s+\S/.test(line)) {
+      // "1. 名字" 或 "1) 名字" 格式
+      const m2 = line.match(/^(\S+?)[\.\)。）]\s+(.+)/);
+      if(m2){ seq = m2[1].trim(); name = m2[2].trim(); }
+    } else {
+      // 空格分隔：第一个词作为序号
+      const parts = line.trim().split(/\s+/);
+      if(parts.length >= 2){ seq = parts[0]; name = parts.slice(1).join(' '); }
     }
+    // 去掉序号末尾多余的标点
+    if(seq && name) m[seq.replace(/[\.\)。）,，]+$/, '')] = name;
   }
   return m;
 }
@@ -497,7 +514,7 @@ function updateMappingPreview() {
     metricChip('已匹配', matched, 'var(--green)') +
     metricChip('未匹配', rows.length - matched, rows.length - matched > 0 ? 'var(--red)' : 'var(--green)');
 
-  $('mappingPreviewCard').style.display = matched > 0 ? 'block' : 'none';
+  $('mappingPreviewCard').style.display = 'block';
 
   if(matched > 0) {
     $('processCard').style.display = 'block';
@@ -545,12 +562,23 @@ document.addEventListener('drop', e => { dc=0; $('dropOverlay').style.display='n
 // Mapping input
 $('mappingInput').addEventListener('input', () => {
   const text = $('mappingInput').value.trim();
-  if(!text) { mapping={}; $('mappingPreviewCard').style.display='none'; return; }
+  if(!text) {
+    mapping={};
+    $('mappingStatus').style.display='none';
+    $('mappingPreviewCard').style.display='none';
+    $('processCard').style.display='none';
+    return;
+  }
   mapping = parseTSV(text);
   const count = Object.keys(mapping).length;
+  $('mappingStatus').style.display = 'block';
   if(count) {
-    $('mappingStatus').style.display = 'block';
     $('mappingStatus').innerHTML = `<div class="status-ok">✅ 解析到 ${count} 条映射</div>`;
+  } else {
+    $('mappingStatus').innerHTML = `<div class="status-warn">⚠️ 无法解析数据，请用 Tab 分隔两列（从 Google Sheets 直接复制即可），或用逗号、空格分隔</div>`;
+    $('mappingPreviewCard').style.display='none';
+    $('processCard').style.display='none';
+    return;
   }
   updateMappingPreview();
 });
