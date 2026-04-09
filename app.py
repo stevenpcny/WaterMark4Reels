@@ -1,10 +1,14 @@
 import tempfile
 import os
 import subprocess
+import time
+import threading
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 from pathlib import Path
+
+import gdrive
 
 from watermark import (
     add_watermark,
@@ -467,6 +471,51 @@ with st.sidebar:
             st.success(f"已重命名为「{new_name}」")
             st.rerun()
 
+    st.divider()
+
+    # ── Google Drive ──
+    st.markdown('<div class="sidebar-section-label">Google Drive</div>', unsafe_allow_html=True)
+
+    if not gdrive.has_credentials_file():
+        with st.expander("☁️ 连接 Google Drive", expanded=False):
+            st.markdown("""
+**一次性配置步骤：**
+1. 打开 [Google Cloud Console](https://console.cloud.google.com/)
+2. 新建项目 → **APIs & Services → Enable APIs** → 搜索 **Google Drive API** → 启用
+3. **Credentials → Create Credentials → OAuth client ID → Desktop app**
+4. 下载 JSON → 重命名为 `credentials.json` → 放到工具文件夹
+5. 重启工具
+""")
+    elif st.session_state.get("drive_oauth_pending"):
+        err = gdrive.get_oauth_error()
+        if err:
+            st.error(f"授权失败：{err}")
+            st.session_state.pop("drive_oauth_pending", None)
+        elif gdrive.is_authenticated():
+            st.session_state.pop("drive_oauth_pending", None)
+            st.rerun()
+        else:
+            st.info("🔐 浏览器已打开，请完成 Google 授权…")
+            time.sleep(2)
+            st.rerun()
+    elif gdrive.is_authenticated():
+        email = gdrive.get_account_email()
+        st.markdown(
+            f'<div style="padding:8px 10px;background:#f0fdf4;border-radius:8px;'
+            f'border:1px solid #bbf7d0;font-size:0.82rem;color:#15803d;font-weight:500;">'
+            f'✅ {email}</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("处理完成后自动上传到 Drive")
+        if st.button("断开连接", use_container_width=True, key="drive_disconnect"):
+            gdrive.revoke_auth()
+            st.rerun()
+    else:
+        if st.button("🔗 连接 Google Drive", use_container_width=True, key="drive_connect"):
+            gdrive.start_oauth_flow()
+            st.session_state["drive_oauth_pending"] = True
+            st.rerun()
+
 # 持久化当前设置
 save_last_used({
     "watermark_text": watermark_text,
@@ -807,18 +856,63 @@ with left_col:
                             unsafe_allow_html=True,
                         )
 
-                        # ── Google Drive 上传 ──
-                        successful_files = [
-                            r for r in results if "✅" in r["结果"]
-                        ]
-                        if successful_files and gdrive.is_authenticated():
-                            if drive_upload:
-                                _do_drive_upload(successful_files, out_path, st.session_state.get("drive_folder_id"))
-                            else:
-                                if st.button("☁️ 上传到 Google Drive", use_container_width=True):
-                                    _do_drive_upload(successful_files, out_path, st.session_state.get("drive_folder_id"))
-
                         st.balloons()
+
+                        # ── Google Drive 自动上传 ──
+                        successful_files = [r for r in results if "✅" in r["结果"]]
+                        if successful_files and gdrive.is_authenticated():
+                            st.divider()
+                            st.markdown('<div class="ui-card-title">☁️ 上传到 Google Drive</div>', unsafe_allow_html=True)
+
+                            folder_name = out_path.name  # 与本地输出文件夹同名
+                            with st.spinner(f"正在 Drive 创建文件夹「{folder_name}」…"):
+                                folder_id = gdrive.create_folder(folder_name)
+
+                            if not folder_id:
+                                st.error("Drive 文件夹创建失败，请检查连接状态")
+                            else:
+                                gdrive.make_shareable(folder_id)
+                                link = gdrive.folder_link(folder_id)
+
+                                up_progress = st.progress(0)
+                                up_status = st.empty()
+                                upload_results = []
+
+                                for i, r in enumerate(successful_files):
+                                    file_path = out_path / r["输出文件"]
+                                    up_status.markdown(
+                                        f'<div style="padding:8px 12px;background:#eff6ff;'
+                                        f'border-radius:8px;font-size:.875rem;color:#1d4ed8;">'
+                                        f'☁️ 上传中 ({i+1}/{len(successful_files)})：{r["输出文件"]}'
+                                        f'</div>',
+                                        unsafe_allow_html=True,
+                                    )
+                                    ok, err = gdrive.upload_file(str(file_path), folder_id)
+                                    upload_results.append({
+                                        "文件": r["输出文件"],
+                                        "上传": "✅" if ok else f"❌ {err}",
+                                    })
+                                    up_progress.progress((i + 1) / len(successful_files))
+
+                                up_status.empty()
+                                up_progress.empty()
+
+                                up_ok = sum(1 for r in upload_results if "✅" in r["上传"])
+                                st.dataframe(pd.DataFrame(upload_results), use_container_width=True, hide_index=True)
+
+                                # 复制链接到剪贴板
+                                gdrive.copy_to_clipboard(link)
+
+                                st.markdown(
+                                    f'<div style="padding:12px 16px;background:#eff6ff;'
+                                    f'border-radius:10px;border:1px solid #bfdbfe;">'
+                                    f'<div style="font-weight:600;color:#1d4ed8;margin-bottom:4px;">'
+                                    f'☁️ 上传完成：{up_ok}/{len(successful_files)} 个文件</div>'
+                                    f'<div style="font-size:.82rem;color:#3b82f6;">📋 Drive 文件夹链接已复制到剪贴板</div>'
+                                    f'<a href="{link}" target="_blank" style="font-size:.82rem;color:#2563eb;">{link}</a>'
+                                    f'</div>',
+                                    unsafe_allow_html=True,
+                                )
 
     elif paste_data and not videos:
         st.markdown(

@@ -141,6 +141,29 @@ def create_folder(name: str, parent_id: Optional[str] = None) -> Optional[str]:
         return None
 
 
+def make_shareable(file_id: str) -> bool:
+    """将文件或文件夹设为「知道链接的人均可查看」"""
+    try:
+        svc = _get_service()
+        svc.permissions().create(
+            fileId=file_id,
+            body={"role": "reader", "type": "anyone"},
+        ).execute()
+        return True
+    except Exception:
+        return False
+
+
+def folder_link(folder_id: str) -> str:
+    return f"https://drive.google.com/drive/folders/{folder_id}"
+
+
+def copy_to_clipboard(text: str) -> None:
+    """将文本复制到 macOS 剪贴板"""
+    import subprocess
+    subprocess.run(["pbcopy"], input=text.encode(), check=False)
+
+
 def upload_file(
     local_path: str,
     folder_id: Optional[str] = None,
