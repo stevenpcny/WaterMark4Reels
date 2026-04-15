@@ -56,16 +56,20 @@ echo "Python: $PYTHON" >> "$LOG"
 # 2. 检查 / 安装 Python 依赖
 # ════════════════════════════════════
 MISSING_PKGS=()
-$PYTHON -c "import streamlit" 2>/dev/null || MISSING_PKGS+=("streamlit")
-$PYTHON -c "import pandas"    2>/dev/null || MISSING_PKGS+=("pandas")
-$PYTHON -c "import PIL"       2>/dev/null || MISSING_PKGS+=("Pillow")
+$PYTHON -c "import streamlit"          2>/dev/null || MISSING_PKGS+=("streamlit")
+$PYTHON -c "import pandas"             2>/dev/null || MISSING_PKGS+=("pandas")
+$PYTHON -c "import PIL"                2>/dev/null || MISSING_PKGS+=("Pillow")
+$PYTHON -c "import google.auth"        2>/dev/null || MISSING_PKGS+=("google-auth")
+$PYTHON -c "import google_auth_oauthlib" 2>/dev/null || MISSING_PKGS+=("google-auth-oauthlib")
+$PYTHON -c "import googleapiclient"    2>/dev/null || MISSING_PKGS+=("google-api-python-client")
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     PKG_LIST="${MISSING_PKGS[*]}"
     progress_start "正在安装 Python 依赖（${PKG_LIST}），请稍候..."
     echo "安装 Python 包: $PKG_LIST" >> "$LOG"
 
-    $PYTHON -m pip install --quiet "${MISSING_PKGS[@]}" >> "$LOG" 2>&1
+    $PYTHON -m pip install --quiet --user "${MISSING_PKGS[@]}" >> "$LOG" 2>&1 \
+        || $PYTHON -m pip install --quiet --break-system-packages "${MISSING_PKGS[@]}" >> "$LOG" 2>&1
     PIP_STATUS=$?
     progress_end
 

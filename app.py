@@ -16,6 +16,7 @@ from watermark import (
     check_videotoolbox,
     find_video_files,
     match_video,
+    match_all_videos,
     generate_preview,
     generate_audio_preview,
     get_available_fonts,
@@ -506,9 +507,38 @@ with st.sidebar:
             f'✅ {email}</div>',
             unsafe_allow_html=True,
         )
-        st.caption("处理完成后自动上传到 Drive")
+
+        # ── Drive 目标文件夹选择 ──
+        st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
+        st.caption("📁 上传到哪个文件夹？")
+
+        # 刷新文件夹列表
+        if "drive_folders" not in st.session_state or st.button("🔄 刷新文件夹列表", use_container_width=True, key="drive_refresh_folders"):
+            with st.spinner("读取 Drive 文件夹…"):
+                st.session_state["drive_folders"] = gdrive.list_folders()
+
+        folders = st.session_state.get("drive_folders", [])
+        folder_options = [{"id": "__auto__", "name": "📁 自动新建（与输出文件夹同名）"}] + folders
+        folder_labels = [f["name"] for f in folder_options]
+        folder_ids    = [f["id"]   for f in folder_options]
+
+        saved_folder_id = st.session_state.get("drive_target_folder_id", "__auto__")
+        saved_idx = folder_ids.index(saved_folder_id) if saved_folder_id in folder_ids else 0
+
+        selected_idx = st.selectbox(
+            "目标文件夹",
+            range(len(folder_labels)),
+            format_func=lambda i: folder_labels[i],
+            index=saved_idx,
+            key="drive_folder_selectbox",
+            label_visibility="collapsed",
+        )
+        st.session_state["drive_target_folder_id"]   = folder_ids[selected_idx]
+        st.session_state["drive_target_folder_name"] = folder_labels[selected_idx]
+
         if st.button("断开连接", use_container_width=True, key="drive_disconnect"):
             gdrive.revoke_auth()
+            st.session_state.pop("drive_folders", None)
             st.rerun()
     else:
         if st.button("🔗 连接 Google Drive", use_container_width=True, key="drive_connect"):
@@ -707,31 +737,45 @@ with left_col:
             st.markdown('<div class="ui-card-title">③ 映射预览</div>', unsafe_allow_html=True)
 
             preview_rows = []
+            total_videos = 0
             for seq, new_name in sorted(mapping.items(), key=lambda x: x[0]):
-                video_file = match_video(seq, videos)
-                status = "✅ 已找到" if video_file else "❌ 未找到"
-                original = video_file.name if video_file else f"(未匹配到「{seq}」)"
+                matched_files = match_all_videos(seq, videos)
                 clean = sanitize_filename(new_name)
-                preview_rows.append({
-                    "关键词": seq,
-                    "原文件": original,
-                    "输出文件名": f"水印-{seq}-{clean}.mp4",
-                    "状态": status,
-                })
+                if not matched_files:
+                    preview_rows.append({
+                        "关键词": seq,
+                        "原文件": f"(未匹配到「{seq}」)",
+                        "输出文件名": "—",
+                        "状态": "❌ 未找到",
+                    })
+                else:
+                    total_videos += len(matched_files)
+                    for i, video_file in enumerate(matched_files, 1):
+                        if len(matched_files) == 1:
+                            out_name = f"水印-{seq}-{clean}.mp4"
+                        else:
+                            out_name = f"水印-{seq}-{clean}-{i}.mp4"
+                        preview_rows.append({
+                            "关键词": seq,
+                            "原文件": video_file.name,
+                            "输出文件名": out_name,
+                            "状态": f"✅ 已找到{f' ({len(matched_files)}个)' if len(matched_files) > 1 and i == 1 else ''}",
+                        })
 
             st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
 
-            matched = sum(1 for r in preview_rows if "✅" in r["状态"])
-            unmatched = len(mapping) - matched
+            matched_entries = sum(1 for seq in mapping if match_all_videos(seq, videos))
+            unmatched = len(mapping) - matched_entries
 
-            m1, m2, m3 = st.columns(3)
+            m1, m2, m3, m4 = st.columns(4)
             m1.metric("总条目", len(mapping))
-            m2.metric("已匹配", matched, delta=None)
+            m2.metric("已匹配", matched_entries)
             m3.metric("未匹配", unmatched, delta=f"-{unmatched}" if unmatched else None, delta_color="inverse" if unmatched else "off")
+            m4.metric("待处理视频", total_videos)
 
             st.divider()
 
-            if matched == 0:
+            if matched_entries == 0:
                 st.warning("没有匹配到任何视频，请检查关键词是否包含在文件名中。")
             else:
                 # ── 确定输出路径 ──
@@ -753,17 +797,21 @@ with left_col:
                     st.error(f"输出文件夹无法写入：{e}\n请重新选择一个有权限的文件夹。")
                     path_ok = False
 
-                # ── Fix #1: 覆盖检测 ──
+                # ── 覆盖检测（支持多匹配） ──
                 if path_ok:
                     existing_files = []
                     for seq, new_name in mapping.items():
-                        video_file = match_video(seq, videos)
-                        if not video_file:
+                        matched_files = match_all_videos(seq, videos)
+                        if not matched_files:
                             continue
                         clean_name = sanitize_filename(new_name)
-                        output_file = out_path / f"水印-{seq}-{clean_name}{video_file.suffix}"
-                        if output_file.exists():
-                            existing_files.append(output_file.name)
+                        for i, vf in enumerate(matched_files, 1):
+                            if len(matched_files) == 1:
+                                output_file = out_path / f"水印-{seq}-{clean_name}{vf.suffix}"
+                            else:
+                                output_file = out_path / f"水印-{seq}-{clean_name}-{i}{vf.suffix}"
+                            if output_file.exists():
+                                existing_files.append(output_file.name)
 
                     if existing_files:
                         st.warning(
@@ -784,52 +832,56 @@ with left_col:
                     )
 
                     if path_ok and overwrite_confirmed and st.button(
-                        f"🚀 开始处理 {matched} 个视频", type="primary", use_container_width=True
+                        f"🚀 开始处理 {total_videos} 个视频", type="primary", use_container_width=True
                     ):
                         out_path.mkdir(parents=True, exist_ok=True)
                         progress = st.progress(0)
                         status_text = st.empty()
                         results = []
-                        total = matched
+                        total = total_videos
                         done = 0
 
                         for seq, new_name in sorted(mapping.items(), key=lambda x: x[0]):
-                            video_file = match_video(seq, videos)
-                            if not video_file:
+                            matched_files = match_all_videos(seq, videos)
+                            if not matched_files:
                                 continue
                             clean_name = sanitize_filename(new_name)
-                            output_file = out_path / f"水印-{seq}-{clean_name}{video_file.suffix}"
+                            for i, video_file in enumerate(matched_files, 1):
+                                if len(matched_files) == 1:
+                                    output_file = out_path / f"水印-{seq}-{clean_name}{video_file.suffix}"
+                                else:
+                                    output_file = out_path / f"水印-{seq}-{clean_name}-{i}{video_file.suffix}"
 
-                            status_text.markdown(
-                                f'<div style="padding:8px 12px;background:#f5f3ff;border-radius:8px;'
-                                f'font-size:0.875rem;color:#6d28d9;">'
-                                f'⚙️ 正在处理 ({done+1}/{total})：{video_file.name}'
-                                f'</div>',
-                                unsafe_allow_html=True,
-                            )
+                                status_text.markdown(
+                                    f'<div style="padding:8px 12px;background:#f5f3ff;border-radius:8px;'
+                                    f'font-size:0.875rem;color:#6d28d9;">'
+                                    f'⚙️ 正在处理 ({done+1}/{total})：{video_file.name}'
+                                    f'</div>',
+                                    unsafe_allow_html=True,
+                                )
 
-                            success, error = add_watermark(
-                                input_path=str(video_file),
-                                output_path=str(output_file),
-                                text=watermark_text,
-                                position=position,
-                                font_size=font_size,
-                                opacity=opacity,
-                                font_color=font_color,
-                                font_path=font_path,
-                                quality=quality,
-                                custom_x=custom_x,
-                                custom_y=custom_y,
-                                encoder=encoder,
-                                volume=volume,
-                            )
-                            done += 1
-                            progress.progress(done / total)
-                            results.append({
-                                "原文件": video_file.name,
-                                "输出文件": output_file.name,
-                                "结果": "✅ 成功" if success else f"❌ {error}",
-                            })
+                                success, error = add_watermark(
+                                    input_path=str(video_file),
+                                    output_path=str(output_file),
+                                    text=watermark_text,
+                                    position=position,
+                                    font_size=font_size,
+                                    opacity=opacity,
+                                    font_color=font_color,
+                                    font_path=font_path,
+                                    quality=quality,
+                                    custom_x=custom_x,
+                                    custom_y=custom_y,
+                                    encoder=encoder,
+                                    volume=volume,
+                                )
+                                done += 1
+                                progress.progress(done / total)
+                                results.append({
+                                    "原文件": video_file.name,
+                                    "输出文件": output_file.name,
+                                    "结果": "✅ 成功" if success else f"❌ {error}",
+                                })
 
                         status_text.empty()
                         progress.empty()
@@ -864,12 +916,19 @@ with left_col:
                             st.divider()
                             st.markdown('<div class="ui-card-title">☁️ 上传到 Google Drive</div>', unsafe_allow_html=True)
 
-                            folder_name = out_path.name  # 与本地输出文件夹同名
-                            with st.spinner(f"正在 Drive 创建文件夹「{folder_name}」…"):
-                                folder_id = gdrive.create_folder(folder_name)
+                            target_folder_id   = st.session_state.get("drive_target_folder_id", "__auto__")
+                            target_folder_name = st.session_state.get("drive_target_folder_name", "")
+
+                            if target_folder_id == "__auto__":
+                                folder_name = out_path.name
+                                with st.spinner(f"正在 Drive 新建文件夹「{folder_name}」…"):
+                                    folder_id = gdrive.create_folder(folder_name)
+                            else:
+                                folder_id = target_folder_id
+                                folder_name = target_folder_name
 
                             if not folder_id:
-                                st.error("Drive 文件夹创建失败，请检查连接状态")
+                                st.error("Drive 文件夹不可用，请检查连接状态或重新选择文件夹")
                             else:
                                 gdrive.make_shareable(folder_id)
                                 link = gdrive.folder_link(folder_id)
@@ -907,7 +966,7 @@ with left_col:
                                     f'<div style="padding:12px 16px;background:#eff6ff;'
                                     f'border-radius:10px;border:1px solid #bfdbfe;">'
                                     f'<div style="font-weight:600;color:#1d4ed8;margin-bottom:4px;">'
-                                    f'☁️ 上传完成：{up_ok}/{len(successful_files)} 个文件</div>'
+                                    f'☁️ 上传完成：{up_ok}/{len(successful_files)} 个文件 → {folder_name}</div>'
                                     f'<div style="font-size:.82rem;color:#3b82f6;">📋 Drive 文件夹链接已复制到剪贴板</div>'
                                     f'<a href="{link}" target="_blank" style="font-size:.82rem;color:#2563eb;">{link}</a>'
                                     f'</div>',

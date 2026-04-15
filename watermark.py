@@ -376,25 +376,39 @@ def find_video_files(folder: str) -> dict:
 
 def match_video(seq: str, videos: dict) -> Optional[Path]:
     """
-    将表格序号/关键词匹配到视频文件（精确 > 前缀 > 包含）
+    将表格序号/关键词匹配到视频文件（精确 > 前缀 > 包含），只返回第一个
     """
-    if seq in videos:
-        return videos[seq]
+    results = match_all_videos(seq, videos)
+    return results[0] if results else None
 
+
+def match_all_videos(seq: str, videos: dict) -> list:
+    """
+    返回所有匹配给定序号/关键词的视频列表（按文件名排序）。
+    优先级：精确匹配 > 前缀匹配 > 包含匹配；同级多个全部返回。
+    """
     seq_lower = seq.lower()
 
+    # 1. 精确匹配
+    exact = [path for stem, path in videos.items() if stem.lower() == seq_lower]
+    if exact:
+        return sorted(exact, key=lambda p: p.stem)
+
+    # 2. 前缀匹配（stem 以 seq + 分隔符开头）
+    prefix_matches = []
     for stem, path in videos.items():
         stem_lower = stem.lower()
         for sep in ("_", " ", "-", "."):
             if stem_lower.startswith(seq_lower + sep):
-                return path
+                prefix_matches.append(path)
+                break
+    if prefix_matches:
+        return sorted(prefix_matches, key=lambda p: p.stem)
 
+    # 3. 包含匹配（seq 作为完整词出现在 stem 中）
     pattern = re.compile(r"(?<![a-zA-Z0-9])" + re.escape(seq_lower) + r"(?![a-zA-Z0-9])")
-    for stem, path in videos.items():
-        if pattern.search(stem.lower()):
-            return path
-
-    return None
+    contains_matches = [path for stem, path in videos.items() if pattern.search(stem.lower())]
+    return sorted(contains_matches, key=lambda p: p.stem)
 
 
 def sanitize_filename(name: str) -> str:
