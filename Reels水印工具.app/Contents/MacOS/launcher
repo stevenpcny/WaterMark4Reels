@@ -62,6 +62,9 @@ $PYTHON -c "import PIL"                2>/dev/null || MISSING_PKGS+=("Pillow")
 $PYTHON -c "import google.auth"        2>/dev/null || MISSING_PKGS+=("google-auth")
 $PYTHON -c "import google_auth_oauthlib" 2>/dev/null || MISSING_PKGS+=("google-auth-oauthlib")
 $PYTHON -c "import googleapiclient"    2>/dev/null || MISSING_PKGS+=("google-api-python-client")
+$PYTHON -c "import faster_whisper"     2>/dev/null || MISSING_PKGS+=("faster-whisper")
+$PYTHON -c "import openai"             2>/dev/null || MISSING_PKGS+=("openai")
+$PYTHON -c "import send2trash"         2>/dev/null || MISSING_PKGS+=("send2trash")
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     PKG_LIST="${MISSING_PKGS[*]}"
