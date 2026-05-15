@@ -50,6 +50,9 @@ DEFAULT_APP_SETTINGS = {
     "move_to_trash": True,
     "drive_target_folder_id": None,
     "drive_target_folder_name": "",
+    "source_image_folder": "",
+    "image_match_auto_threshold": 18,
+    "image_match_review_threshold": 24,
 }
 
 DEFAULT_PRESETS = {

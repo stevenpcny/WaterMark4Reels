@@ -38,6 +38,14 @@ from matching import (
     review_id_for,
     sort_video_files,
 )
+from image_matching import (
+    find_image_files,
+    hash_image,
+    hash_video_frames,
+    assign_videos_to_images,
+    copy_image_with_new_name,
+    make_frame_workdir,
+)
 from processing import (
     build_process_items,
     detect_existing_outputs,
@@ -844,6 +852,50 @@ with left_col:
 
     videos = uploaded_video_paths
 
+    # ── 原图文件夹（可选） ──
+    with st.expander("🖼️ 原图文件夹（可选，配对后自动重命名复制）", expanded=False):
+        img_col1, img_col2 = st.columns([5, 1])
+        with img_col1:
+            source_image_folder = st.text_input(
+                "原图文件夹路径", label_visibility="collapsed",
+                placeholder="/Users/你的用户名/Pictures/原图",
+                key="source_image_folder",
+            )
+        with img_col2:
+            if st.button("📂", help="选择文件夹", key="pick_image_folder"):
+                pick_folder_into("source_image_folder")
+        if source_image_folder:
+            _imgs_preview = find_image_files(source_image_folder)
+            if _imgs_preview:
+                st.markdown(
+                    f'<div class="info-bar info-bar-green">'
+                    f'<span>✅</span><span style="font-weight:500;">找到 {len(_imgs_preview)} 张原图</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div class="info-bar info-bar-orange">'
+                    '<span>⚠️</span><span>该文件夹中没有找到图片</span>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+        thr_col1, thr_col2 = st.columns(2)
+        with thr_col1:
+            st.number_input(
+                "自动匹配阈值（汉明距离 ≤）",
+                min_value=4, max_value=32, step=2,
+                help="距离越小越严。talking-head 动画建议 16-20。",
+                key="image_match_auto_threshold",
+            )
+        with thr_col2:
+            st.number_input(
+                "需要复核的阈值（≤）",
+                min_value=8, max_value=40, step=2,
+                help="距离介于自动阈值和这个之间的会被标记为'需复核'。",
+                key="image_match_review_threshold",
+            )
+
     def _source_state_snapshot() -> dict:
         return {
             "import_mode": st.session_state.get("import_mode", import_mode),
@@ -1474,6 +1526,185 @@ with left_col:
                 else:
                     st.warning(f"表格比视频多 {len(mapping_entries) - len(ordered_video_files)} 行，多出来的文案没有对应视频。")
 
+            # ── 4️⃣ 图片配对（可选） ──
+            _image_folder = (st.session_state.get("source_image_folder") or "").strip()
+            if _image_folder and find_image_files(_image_folder):
+                st.divider()
+                st.markdown('<div class="section-title">4️⃣ 图片配对（可选）</div>', unsafe_allow_html=True)
+                st.caption("用感知哈希在视频中段抽帧 → 与原图对比。对 talking-head 动画做了适配，仍可能误判，请人工复核。")
+
+                _img_videos_for_match = []
+                for item in review_items:
+                    if review_only_confirmed and review_statuses.get(item["id"]) != "confirmed":
+                        continue
+                    _img_videos_for_match.append(item)
+
+                match_btn_cols = st.columns([2, 1])
+                with match_btn_cols[0]:
+                    do_image_match = st.button(
+                        f"🖼️ 配对原图（{len(_img_videos_for_match)} 个视频 × {len(find_image_files(_image_folder))} 张图）",
+                        use_container_width=True,
+                        key="run_image_match_btn",
+                        disabled=not _img_videos_for_match,
+                    )
+                with match_btn_cols[1]:
+                    if st.button("清空结果", use_container_width=True, key="clear_image_match_btn"):
+                        st.session_state.pop("image_match_result", None)
+                        st.session_state.pop("image_match_overrides", None)
+                        st.rerun()
+
+                if do_image_match and _img_videos_for_match:
+                    auto_thr = int(st.session_state.get("image_match_auto_threshold", 18))
+                    review_thr = int(st.session_state.get("image_match_review_threshold", 24))
+                    progress = st.progress(0)
+                    status_text = st.empty()
+                    work_dir = make_frame_workdir()
+                    try:
+                        image_paths = find_image_files(_image_folder)
+                        image_hashes: dict[str, tuple[str, str]] = {}
+                        total_imgs = len(image_paths)
+                        for idx, img_path in enumerate(image_paths):
+                            status_text.write(f"算图片哈希 {idx+1}/{total_imgs}：{img_path.name}")
+                            h = hash_image(img_path)
+                            if h:
+                                image_hashes[str(img_path)] = h
+                            progress.progress((idx + 1) / max(1, total_imgs + len(_img_videos_for_match)))
+
+                        video_hashes: dict[str, list[tuple[str, str]]] = {}
+                        for vidx, item in enumerate(_img_videos_for_match):
+                            status_text.write(f"抽帧并哈希 {vidx+1}/{len(_img_videos_for_match)}：{item['video_file'].name}")
+                            vh = hash_video_frames(item["video_file"], work_dir)
+                            if vh:
+                                video_hashes[item["id"]] = vh
+                            progress.progress((total_imgs + vidx + 1) / max(1, total_imgs + len(_img_videos_for_match)))
+
+                        result = assign_videos_to_images(
+                            video_hashes, image_hashes,
+                            auto_threshold=auto_thr,
+                            review_threshold=review_thr,
+                        )
+                        st.session_state["image_match_result"] = result
+                        st.session_state["image_match_video_ids"] = [it["id"] for it in _img_videos_for_match]
+                        st.session_state["image_match_overrides"] = {}
+                    finally:
+                        try:
+                            import shutil as _sh
+                            _sh.rmtree(work_dir, ignore_errors=True)
+                        except Exception:
+                            pass
+                        status_text.empty()
+                        progress.empty()
+
+                _result = st.session_state.get("image_match_result")
+                if _result:
+                    assignments = dict(_result.get("assignments", {}))
+                    overrides = st.session_state.setdefault("image_match_overrides", {})
+                    # 应用 override 到 assignments 的最终显示
+                    final_map: dict[str, str | None] = {}
+                    for vid, info in assignments.items():
+                        final_map[vid] = overrides.get(vid, info.get("image"))
+
+                    auto_n = sum(1 for v, info in assignments.items() if info["status"] == "auto" and overrides.get(v, info["image"]))
+                    review_n = sum(1 for v, info in assignments.items() if info["status"] == "review")
+                    unmatched_n = sum(1 for v in assignments if not final_map.get(v))
+
+                    st.markdown(
+                        f"""
+                        <div class="workflow-stats">
+                          <div class="workflow-stat"><span>自动匹配</span><strong>{auto_n}</strong></div>
+                          <div class="workflow-stat"><span>需复核</span><strong>{review_n}</strong></div>
+                          <div class="workflow-stat"><span>未匹配</span><strong>{unmatched_n}</strong></div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    # 冲突卡片
+                    conflicts = _result.get("conflicts", [])
+                    real_conflicts = [
+                        c for c in conflicts
+                        if len([cand for cand in c["candidates"]
+                                if final_map.get(cand["video"]) == c["image"]]) > 1
+                    ]
+                    if real_conflicts:
+                        st.markdown('<div class="subsection-title">⚠️ 冲突：多个视频指向同一张图</div>', unsafe_allow_html=True)
+                        for ci, conf in enumerate(real_conflicts):
+                            img_name = Path(conf["image"]).name
+                            cand_videos = conf["candidates"]
+                            options = ["（都不选，全部跳过）"] + [
+                                f"{next((it['video_file'].name for it in review_items if it['id'] == c['video']), c['video'])}（距离 {c['distance']}）"
+                                for c in cand_videos
+                            ]
+                            chosen = st.radio(
+                                f"图片 {img_name}：保留哪个视频对应它？",
+                                options=list(range(len(options))),
+                                format_func=lambda i: options[i],
+                                key=f"conflict_resolve_{ci}_{img_name}",
+                            )
+                            if chosen == 0:
+                                for c in cand_videos:
+                                    overrides[c["video"]] = None
+                            else:
+                                winner = cand_videos[chosen - 1]["video"]
+                                for c in cand_videos:
+                                    if c["video"] == winner:
+                                        overrides[c["video"]] = conf["image"]
+                                    elif final_map.get(c["video"]) == conf["image"]:
+                                        overrides[c["video"]] = None
+
+                    # 主表格
+                    table_rows = []
+                    review_lookup = {it["id"]: it for it in review_items}
+                    for vid, info in assignments.items():
+                        item = review_lookup.get(vid)
+                        if not item:
+                            continue
+                        final_img = overrides.get(vid, info["image"])
+                        status_label = {
+                            "auto": "✅ 自动",
+                            "review": "🟡 需复核",
+                            "unmatched": "❌ 未匹配",
+                        }[info["status"]]
+                        if final_img is None and info["image"] is not None:
+                            status_label = "🚫 已跳过"
+                        table_rows.append({
+                            "视频": item["video_file"].name,
+                            "新文件名": item["output_name"],
+                            "原图": Path(final_img).name if final_img else "—",
+                            "距离": info["distance"] if info["distance"] is not None else "—",
+                            "状态": status_label,
+                        })
+                    if table_rows:
+                        st.dataframe(_pd_dataframe(table_rows), use_container_width=True, hide_index=True)
+
+                    # 手动指认
+                    with st.expander("✋ 手动指认 / 修改某个视频的图片", expanded=False):
+                        vid_options = list(assignments.keys())
+                        if vid_options:
+                            sel_vid = st.selectbox(
+                                "选择视频",
+                                vid_options,
+                                format_func=lambda v: review_lookup[v]["video_file"].name if v in review_lookup else v,
+                                key="manual_image_pick_vid",
+                            )
+                            image_paths_all = find_image_files(_image_folder)
+                            img_options = ["（不配对）"] + [str(p) for p in image_paths_all]
+                            current_img = overrides.get(sel_vid, assignments[sel_vid].get("image"))
+                            try:
+                                default_idx = img_options.index(current_img) if current_img else 0
+                            except ValueError:
+                                default_idx = 0
+                            sel_img = st.selectbox(
+                                "对应图片",
+                                img_options,
+                                index=default_idx,
+                                format_func=lambda p: "（不配对）" if p == "（不配对）" else Path(p).name,
+                                key="manual_image_pick_img",
+                            )
+                            if st.button("应用", key="apply_manual_image_pick"):
+                                overrides[sel_vid] = None if sel_img == "（不配对）" else sel_img
+                                st.rerun()
+
             st.divider()
             main_export_btn = st.button("🚀 一键导出", key="main_export_btn", use_container_width=True)
             export_clicked = sidebar_export_btn or main_export_btn
@@ -1574,6 +1805,18 @@ with left_col:
                         status_text = st.empty()
                         results = []
                         job_records = []
+
+                        _img_assignments = (st.session_state.get("image_match_result") or {}).get("assignments", {})
+                        _img_overrides = st.session_state.get("image_match_overrides", {})
+                        def _image_for_review_id(rid: str) -> str | None:
+                            if rid in _img_overrides:
+                                return _img_overrides[rid]
+                            info = _img_assignments.get(rid)
+                            return info.get("image") if info else None
+
+                        image_dest_folder = out_path / "原图-已配对"
+                        image_copy_results = []
+
                         for skipped_item in skipped_existing_items:
                             skipped_row = make_result_row(
                                 skipped_item,
@@ -1613,6 +1856,27 @@ with left_col:
                                 volume=volume,
                             )
 
+                            if success:
+                                src_image = _image_for_review_id(item.get("review_id", ""))
+                                if src_image:
+                                    try:
+                                        copied = copy_image_with_new_name(
+                                            Path(src_image), image_dest_folder, output_file.stem,
+                                        )
+                                        image_copy_results.append({
+                                            "视频": output_file.name,
+                                            "原图": Path(src_image).name,
+                                            "复制到": copied.name,
+                                            "结果": "✅",
+                                        })
+                                    except Exception as img_err:
+                                        image_copy_results.append({
+                                            "视频": output_file.name,
+                                            "原图": Path(src_image).name,
+                                            "复制到": "—",
+                                            "结果": f"❌ {img_err}",
+                                        })
+
                             done += 1
                             progress.progress(done / total)
                             result_row = make_result_row(
@@ -1637,6 +1901,11 @@ with left_col:
                         rc.metric("❌ 失败", failed)
 
                         st.dataframe(_pd_dataframe(results), use_container_width=True, hide_index=True)
+
+                        if image_copy_results:
+                            st.markdown('<div class="subsection-title">🖼️ 原图复制结果</div>', unsafe_allow_html=True)
+                            st.caption(f"原图已复制到：{image_dest_folder}")
+                            st.dataframe(_pd_dataframe(image_copy_results), use_container_width=True, hide_index=True)
 
                         if failed:
                             st.warning(f"{failed} 个文件处理失败，请查看上方结果表格。")
