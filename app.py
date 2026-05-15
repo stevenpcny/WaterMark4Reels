@@ -216,9 +216,18 @@ if "recognition_default_window_updated" not in st.session_state:
         st.session_state.get("recognize_start_seconds") == 20
         and st.session_state.get("recognize_end_seconds") == 80
     ):
-        st.session_state["recognize_start_seconds"] = 10
+        st.session_state["recognize_start_seconds"] = 5
         st.session_state["recognize_end_seconds"] = 20
     st.session_state["recognition_default_window_updated"] = True
+
+# 把旧默认 10-20s / 阈值 0.8 一次性升级到新默认 5-20s / 阈值 0.9
+if "recognition_defaults_v2" not in st.session_state:
+    if st.session_state.get("recognize_start_seconds") == 10 \
+       and st.session_state.get("recognize_end_seconds") == 20:
+        st.session_state["recognize_start_seconds"] = 5
+    if st.session_state.get("match_threshold") == 0.8:
+        st.session_state["match_threshold"] = 0.9
+    st.session_state["recognition_defaults_v2"] = True
 
 
 # ══════════════════════════════════════
@@ -243,41 +252,205 @@ with st.sidebar:
     def settings_expanded(*terms: str, default: bool = False) -> bool:
         return default
 
+    # ── 视频导入 ──
+    with st.expander("① 导入视频", expanded=True):
+        default_downloads = str(Path.home() / "Downloads")
+        default_output_folder = str(Path.home() / "Downloads" / "打好水印")
+        if "source_folder_upload_val" not in st.session_state:
+            st.session_state["source_folder_upload_val"] = default_downloads
+        if "output_folder_upload_val" not in st.session_state:
+            st.session_state["output_folder_upload_val"] = default_output_folder
+        st.session_state.setdefault("output_folder_path_val", default_output_folder)
+        st.session_state.setdefault("video_folder_path", "")
+        for path_key in (
+            "source_folder_upload_val",
+            "output_folder_upload_val",
+            "output_folder_path_val",
+            "video_folder_path",
+        ):
+            pending_key = f"pending_{path_key}"
+            if pending_key in st.session_state:
+                st.session_state[path_key] = st.session_state.pop(pending_key)
+
+        import_mode = st.radio(
+            "导入方式",
+            ["拖拽上传视频", "输入文件夹路径"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="import_mode",
+        )
+
+        uploaded_video_paths = {}
+        source_folder = None
+
+        if import_mode == "拖拽上传视频":
+            uploaded_video_paths = {
+                stem: Path(path)
+                for stem, path in st.session_state.get("uploaded_video_path_cache", {}).items()
+                if Path(path).exists()
+            }
+            uploaded_files = st.file_uploader(
+                "拖拽或点击选择视频文件",
+                type=["mp4", "mov", "avi", "mkv", "webm"],
+                accept_multiple_files=True,
+            )
+            if uploaded_files:
+                upload_dir = os.path.join(tempfile.gettempdir(), "reels_watermark_uploads")
+                os.makedirs(upload_dir, exist_ok=True)
+                new_names = {uf.name for uf in uploaded_files}
+                if new_names != st.session_state.get("uploaded_names", set()):
+                    st.session_state["uploaded_names"] = new_names
+                    st.session_state["auto_preview"] = True
+                for uf in uploaded_files:
+                    save_path = os.path.join(upload_dir, uf.name)
+                    with open(save_path, "wb") as f:
+                        f.write(uf.getbuffer())
+                    uploaded_video_paths[Path(uf.name).stem] = Path(save_path)
+                st.session_state["uploaded_video_path_cache"] = {
+                    stem: str(path) for stem, path in uploaded_video_paths.items()
+                }
+
+            if uploaded_video_paths:
+                st.markdown(
+                    f'<div class="info-bar info-bar-green">'
+                    f'<span>✅</span>'
+                    f'<span style="font-weight:500;">当前已保留 {len(uploaded_video_paths)} 个上传视频</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button("清空已上传视频", use_container_width=True, key="clear_uploaded_video_cache"):
+                    st.session_state.pop("uploaded_video_path_cache", None)
+                    st.session_state.pop("uploaded_names", None)
+                    st.session_state.pop("voice_match_result", None)
+                    st.rerun()
+
+            st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
+            st.markdown("**📁 原视频所在目录**", unsafe_allow_html=False)
+            src_col1, src_col2 = st.columns([5, 1])
+            with src_col1:
+                source_folder_input = st.text_input(
+                    "原视频目录", label_visibility="collapsed",
+                    placeholder="/Users/你的用户名/Downloads",
+                    key="source_folder_upload_val",
+                )
+            with src_col2:
+                if st.button("📂", help="选择文件夹", key="pick_source_upload"):
+                    pick_folder_into("source_folder_upload_val")
+            source_folder = st.session_state.get("source_folder_upload_val", "").strip() or None
+
+            st.markdown("**📂 成品文件夹** <span style='color:#94a3b8;font-size:0.8rem;'>（建议单独放打好水印的视频）</span>", unsafe_allow_html=True)
+            out_col1, out_col2 = st.columns([5, 1])
+            with out_col1:
+                output_folder = st.text_input(
+                    "输出路径", label_visibility="collapsed",
+                    placeholder="/Users/你的用户名/Downloads/打好水印",
+                    key="output_folder_upload_val",
+                )
+            with out_col2:
+                if st.button("📂", help="选择文件夹", key="pick_out_upload"):
+                    pick_folder_into("output_folder_upload_val")
+            quick_out_cols = st.columns(2)
+            with quick_out_cols[0]:
+                if st.button("用桌面/打好水印", use_container_width=True, key="use_desktop_output_upload"):
+                    set_pending_path("output_folder_upload_val", desktop_output_folder())
+            with quick_out_cols[1]:
+                if st.button("用原视频目录/打好水印", use_container_width=True, key="use_source_output_upload"):
+                    if source_folder:
+                        set_pending_path("output_folder_upload_val", str(Path(source_folder) / "打好水印"))
+                    else:
+                        st.warning("请先填写原视频所在目录。")
+
+        else:
+            st.markdown("**📁 视频文件夹**")
+            vf_col1, vf_col2 = st.columns([5, 1])
+            with vf_col1:
+                video_folder = st.text_input(
+                    "视频路径", label_visibility="collapsed",
+                    placeholder="/Users/你的用户名/Videos/reels",
+                    key="video_folder_path",
+                )
+            with vf_col2:
+                if st.button("📂", help="选择文件夹", key="pick_video"):
+                    pick_folder_into("video_folder_path")
+
+            if video_folder:
+                uploaded_video_paths = find_video_files(video_folder)
+                source_folder = video_folder
+                if uploaded_video_paths:
+                    st.markdown(
+                        f'<div class="info-bar info-bar-green">'
+                        f'<span>✅</span>'
+                        f'<span style="font-weight:500;">找到 {len(uploaded_video_paths)} 个视频文件</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        '<div class="info-bar info-bar-orange">'
+                        '<span>⚠️</span><span>该文件夹中没有找到视频文件</span>'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+            st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
+            st.markdown("**📂 成品文件夹** <span style='color:#94a3b8;font-size:0.8rem;'>（建议单独放打好水印的视频）</span>", unsafe_allow_html=True)
+            of_col1, of_col2 = st.columns([5, 1])
+            with of_col1:
+                output_folder = st.text_input(
+                    "输出路径", label_visibility="collapsed",
+                    placeholder="/Users/你的用户名/Downloads/打好水印",
+                    key="output_folder_path_val",
+                )
+            with of_col2:
+                if st.button("📂", help="选择文件夹", key="pick_out_folder"):
+                    pick_folder_into("output_folder_path_val")
+            quick_out_cols = st.columns(2)
+            with quick_out_cols[0]:
+                if st.button("用桌面/打好水印", use_container_width=True, key="use_desktop_output_folder"):
+                    set_pending_path("output_folder_path_val", desktop_output_folder())
+            with quick_out_cols[1]:
+                if st.button("用视频文件夹/打好水印", use_container_width=True, key="use_video_output_folder"):
+                    if video_folder:
+                        set_pending_path("output_folder_path_val", str(Path(video_folder) / "打好水印"))
+                    else:
+                        st.warning("请先填写视频文件夹。")
+
+        videos = uploaded_video_paths
+
+    st.markdown("### ② 水印参数")
+
     # ── 常用水印设置 ──
-    st.markdown('<div class="sidebar-label">常用设置</div>', unsafe_allow_html=True)
+    with st.expander("常用设置", expanded=True):
+        watermark_text = st.text_input("水印文字", key="watermark_text", placeholder="输入水印内容…")
 
-    watermark_text = st.text_input("水印文字", key="watermark_text", placeholder="输入水印内容…")
+        position = st.selectbox(
+            "水印位置",
+            ["右下", "左下", "右上", "左上", "居中", "自定义"],
+            index=["右下", "左下", "右上", "左上", "居中", "自定义"].index(
+                st.session_state.get("position", "右下")
+            ),
+            key="position",
+        )
+        custom_x = custom_y = None
+        if position == "自定义":
+            with st.expander("自定义水印坐标", expanded=True):
+                st.caption("X/Y 为像素值，(0,0) 为左上角")
+                c1, c2 = st.columns(2)
+                with c1:
+                    custom_x = st.number_input("X", min_value=0, max_value=3840, key="custom_x", label_visibility="collapsed")
+                    st.caption("← X")
+                with c2:
+                    custom_y = st.number_input("Y", min_value=0, max_value=2160, key="custom_y", label_visibility="collapsed")
+                    st.caption("← Y")
+        else:
+            custom_x = st.session_state.get("custom_x", 100)
+            custom_y = st.session_state.get("custom_y", 100)
 
-    position = st.selectbox(
-        "水印位置",
-        ["右下", "左下", "右上", "左上", "居中", "自定义"],
-        index=["右下", "左下", "右上", "左上", "居中", "自定义"].index(
-            st.session_state.get("position", "右下")
-        ),
-        key="position",
-    )
-    custom_x = custom_y = None
-    if position == "自定义":
-        with st.expander("自定义水印坐标", expanded=True):
-            st.caption("X/Y 为像素值，(0,0) 为左上角")
-            c1, c2 = st.columns(2)
-            with c1:
-                custom_x = st.number_input("X", min_value=0, max_value=3840, key="custom_x", label_visibility="collapsed")
-                st.caption("← X")
-            with c2:
-                custom_y = st.number_input("Y", min_value=0, max_value=2160, key="custom_y", label_visibility="collapsed")
-                st.caption("← Y")
-    else:
-        custom_x = st.session_state.get("custom_x", 100)
-        custom_y = st.session_state.get("custom_y", 100)
-
-    col_sz, col_op = st.columns(2)
-    with col_sz:
-        font_size = st.slider("字号", min_value=12, max_value=120, key="font_size")
-    with col_op:
-        opacity = st.slider("透明度", min_value=0.1, max_value=1.0, step=0.1, key="opacity")
-
-    st.markdown('<div class="sidebar-label">设置面板</div>', unsafe_allow_html=True)
+        col_sz, col_op = st.columns(2)
+        with col_sz:
+            font_size = st.slider("字号", min_value=12, max_value=120, key="font_size")
+        with col_op:
+            opacity = st.slider("透明度", min_value=0.1, max_value=1.0, step=0.1, key="opacity")
 
     available_fonts = get_available_fonts()
     font_names = ["系统默认"] + list(available_fonts.keys())
@@ -366,50 +539,8 @@ with st.sidebar:
     if preset_notice:
         st.success(preset_notice)
 
-    if settings_match("预设", "保存", "载入"):
-        with st.expander("预设", expanded=settings_expanded("预设", "保存", "载入", default=False)):
-            selected_slot_label = st.selectbox(
-                "选择预设",
-                options=preset_slots,
-                format_func=lambda k: f"{k} · {all_data['presets'][k]['name']}",
-                key="selected_slot",
-            )
-            selected_preset = all_data["presets"][selected_slot_label]
-            saved_settings = get_preset_settings(selected_slot_label) or dict(DEFAULT_SETTINGS)
-
-            st.caption(
-                f"已保存：{saved_settings.get('watermark_text', '') or '空水印'} · "
-                f"{saved_settings.get('position', '右下')} · "
-                f"{saved_settings.get('font_size', DEFAULT_SETTINGS['font_size'])}号 · "
-                f"{int(float(saved_settings.get('opacity', DEFAULT_SETTINGS['opacity'])) * 100)}%透明度"
-            )
-
-            preset_col_a, preset_col_b = st.columns(2)
-            with preset_col_a:
-                if st.button("载入预设", use_container_width=True, key="preset_load_btn"):
-                    st.session_state["pending_widget_settings"] = saved_settings
-                    st.session_state["preset_notice"] = f"已载入「{selected_preset['name']}」"
-                    st.rerun()
-            with preset_col_b:
-                if st.button("保存当前", use_container_width=True, key="preset_save_btn"):
-                    current = {k: st.session_state.get(k, DEFAULT_SETTINGS.get(k)) for k in DEFAULT_SETTINGS}
-                    save_preset(selected_slot_label, selected_preset["name"], current)
-                    st.session_state["preset_notice"] = f"已保存到「{selected_preset['name']}」"
-                    st.rerun()
-
-            new_name = st.text_input(
-                "预设名称",
-                value=selected_preset["name"],
-                key=f"rename_input_{selected_slot_label}",
-                placeholder="例如：右上角小字",
-            ).strip()
-            if st.button("保存名称", use_container_width=True, key="preset_rename_btn"):
-                if not new_name:
-                    st.warning("预设名称不能为空")
-                else:
-                    rename_preset(selected_slot_label, new_name)
-                    st.session_state["preset_notice"] = f"已重命名为「{new_name}」"
-                    st.rerun()
+    st.divider()
+    st.markdown("### ② Google Drive")
 
     if settings_match("drive", "google", "上传", "云盘"):
         with st.expander("Google Drive", expanded=settings_expanded("drive", "google", "上传", "云盘", default=False)):
@@ -608,40 +739,56 @@ with st.sidebar:
                     st.session_state["drive_oauth_pending"] = True
                     st.rerun()
 
-    if settings_match("预览", "字幕", "播放器", "时间轴"):
-        with st.expander("预览与字幕", expanded=settings_expanded("预览", "字幕", "播放器", "时间轴", default=False)):
-            video_layout_choice = st.selectbox(
-                "检查视频大小",
-                ["标准", "大", "超大"],
-                key="review_video_layout",
-                help="会调整右侧检查区域的宽度；选择后页面会自动重排。",
+    st.divider()
+    st.markdown("### 其他")
+
+    if settings_match("预设", "保存", "载入"):
+        with st.expander("预设", expanded=settings_expanded("预设", "保存", "载入", default=False)):
+            selected_slot_label = st.selectbox(
+                "选择预设",
+                options=preset_slots,
+                format_func=lambda k: f"{k} · {all_data['presets'][k]['name']}",
+                key="selected_slot",
             )
-            default_width = {"标准": 520, "大": 680, "超大": 860}.get(video_layout_choice, 520)
-            review_video_width = st.slider(
-                "播放器宽度",
-                min_value=360,
-                max_value=980,
-                value=int(st.session_state.get("review_video_width", default_width)),
-                step=20,
-                key="review_video_width",
+            selected_preset = all_data["presets"][selected_slot_label]
+            saved_settings = get_preset_settings(selected_slot_label) or dict(DEFAULT_SETTINGS)
+
+            st.caption(
+                f"已保存：{saved_settings.get('watermark_text', '') or '空水印'} · "
+                f"{saved_settings.get('position', '右下')} · "
+                f"{saved_settings.get('font_size', DEFAULT_SETTINGS['font_size'])}号 · "
+                f"{int(float(saved_settings.get('opacity', DEFAULT_SETTINGS['opacity'])) * 100)}%透明度"
             )
-            auto_play_review_video = st.checkbox(
-                "切到下一个后自动播放",
-                value=bool(st.session_state.get("auto_play_review_video", True)),
-                key="auto_play_review_video",
-                help="浏览器通常要求静音才能自动播放。",
-            )
-            mute_auto_play_review_video = st.checkbox(
-                "自动播放时静音",
-                value=bool(st.session_state.get("mute_auto_play_review_video", True)),
-                key="mute_auto_play_review_video",
-            )
-    else:
-        video_layout_choice = st.session_state.get("review_video_layout", "标准")
-        default_width = {"标准": 520, "大": 680, "超大": 860}.get(video_layout_choice, 520)
-        review_video_width = int(st.session_state.get("review_video_width", default_width))
-        auto_play_review_video = bool(st.session_state.get("auto_play_review_video", True))
-        mute_auto_play_review_video = bool(st.session_state.get("mute_auto_play_review_video", True))
+
+            preset_col_a, preset_col_b = st.columns(2)
+            with preset_col_a:
+                if st.button("载入预设", use_container_width=True, key="preset_load_btn"):
+                    st.session_state["pending_widget_settings"] = saved_settings
+                    st.session_state["preset_notice"] = f"已载入「{selected_preset['name']}」"
+                    st.rerun()
+            with preset_col_b:
+                if st.button("保存当前", use_container_width=True, key="preset_save_btn"):
+                    current = {k: st.session_state.get(k, DEFAULT_SETTINGS.get(k)) for k in DEFAULT_SETTINGS}
+                    save_preset(selected_slot_label, selected_preset["name"], current)
+                    st.session_state["preset_notice"] = f"已保存到「{selected_preset['name']}」"
+                    st.rerun()
+
+            new_name = st.text_input(
+                "预设名称",
+                value=selected_preset["name"],
+                key=f"rename_input_{selected_slot_label}",
+                placeholder="例如：右上角小字",
+            ).strip()
+            if st.button("保存名称", use_container_width=True, key="preset_rename_btn"):
+                if not new_name:
+                    st.warning("预设名称不能为空")
+                else:
+                    rename_preset(selected_slot_label, new_name)
+                    st.session_state["preset_notice"] = f"已重命名为「{new_name}」"
+                    st.rerun()
+
+    st.divider()
+    sidebar_export_btn = st.button("🚀 一键导出", key="sidebar_export_btn", use_container_width=True)
 
 # 持久化当前设置
 save_last_used({
@@ -688,174 +835,6 @@ left_col, right_col = st.columns(column_ratios, gap="large")
 
 with left_col:
 
-    # ── 视频导入 ──
-    st.markdown('<div class="section-title">① 导入视频</div>', unsafe_allow_html=True)
-
-    default_downloads = str(Path.home() / "Downloads")
-    default_output_folder = str(Path.home() / "Downloads" / "打好水印")
-    if "source_folder_upload_val" not in st.session_state:
-        st.session_state["source_folder_upload_val"] = default_downloads
-    if "output_folder_upload_val" not in st.session_state:
-        st.session_state["output_folder_upload_val"] = default_output_folder
-    st.session_state.setdefault("output_folder_path_val", default_output_folder)
-    st.session_state.setdefault("video_folder_path", "")
-    for path_key in (
-        "source_folder_upload_val",
-        "output_folder_upload_val",
-        "output_folder_path_val",
-        "video_folder_path",
-    ):
-        pending_key = f"pending_{path_key}"
-        if pending_key in st.session_state:
-            st.session_state[path_key] = st.session_state.pop(pending_key)
-
-    import_mode = st.radio(
-        "导入方式",
-        ["拖拽上传视频", "输入文件夹路径"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="import_mode",
-    )
-
-    uploaded_video_paths = {}
-    source_folder = None
-
-    if import_mode == "拖拽上传视频":
-        uploaded_video_paths = {
-            stem: Path(path)
-            for stem, path in st.session_state.get("uploaded_video_path_cache", {}).items()
-            if Path(path).exists()
-        }
-        uploaded_files = st.file_uploader(
-            "拖拽或点击选择视频文件",
-            type=["mp4", "mov", "avi", "mkv", "webm"],
-            accept_multiple_files=True,
-        )
-        if uploaded_files:
-            upload_dir = os.path.join(tempfile.gettempdir(), "reels_watermark_uploads")
-            os.makedirs(upload_dir, exist_ok=True)
-            new_names = {uf.name for uf in uploaded_files}
-            if new_names != st.session_state.get("uploaded_names", set()):
-                st.session_state["uploaded_names"] = new_names
-                st.session_state["auto_preview"] = True
-            for uf in uploaded_files:
-                save_path = os.path.join(upload_dir, uf.name)
-                with open(save_path, "wb") as f:
-                    f.write(uf.getbuffer())
-                uploaded_video_paths[Path(uf.name).stem] = Path(save_path)
-            st.session_state["uploaded_video_path_cache"] = {
-                stem: str(path) for stem, path in uploaded_video_paths.items()
-            }
-
-        if uploaded_video_paths:
-            st.markdown(
-                f'<div class="info-bar info-bar-green">'
-                f'<span>✅</span>'
-                f'<span style="font-weight:500;">当前已保留 {len(uploaded_video_paths)} 个上传视频</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-            if st.button("清空已上传视频", use_container_width=True, key="clear_uploaded_video_cache"):
-                st.session_state.pop("uploaded_video_path_cache", None)
-                st.session_state.pop("uploaded_names", None)
-                st.session_state.pop("voice_match_result", None)
-                st.rerun()
-
-        st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
-        st.markdown("**📁 原视频所在目录**", unsafe_allow_html=False)
-        src_col1, src_col2 = st.columns([5, 1])
-        with src_col1:
-            source_folder_input = st.text_input(
-                "原视频目录", label_visibility="collapsed",
-                placeholder="/Users/你的用户名/Downloads",
-                key="source_folder_upload_val",
-            )
-        with src_col2:
-            if st.button("📂", help="选择文件夹", key="pick_source_upload"):
-                pick_folder_into("source_folder_upload_val")
-        source_folder = st.session_state.get("source_folder_upload_val", "").strip() or None
-
-        st.markdown("**📂 成品文件夹** <span style='color:#94a3b8;font-size:0.8rem;'>（建议单独放打好水印的视频）</span>", unsafe_allow_html=True)
-        out_col1, out_col2 = st.columns([5, 1])
-        with out_col1:
-            output_folder = st.text_input(
-                "输出路径", label_visibility="collapsed",
-                placeholder="/Users/你的用户名/Downloads/打好水印",
-                key="output_folder_upload_val",
-            )
-        with out_col2:
-            if st.button("📂", help="选择文件夹", key="pick_out_upload"):
-                pick_folder_into("output_folder_upload_val")
-        quick_out_cols = st.columns(2)
-        with quick_out_cols[0]:
-            if st.button("用桌面/打好水印", use_container_width=True, key="use_desktop_output_upload"):
-                set_pending_path("output_folder_upload_val", desktop_output_folder())
-        with quick_out_cols[1]:
-            if st.button("用原视频目录/打好水印", use_container_width=True, key="use_source_output_upload"):
-                if source_folder:
-                    set_pending_path("output_folder_upload_val", str(Path(source_folder) / "打好水印"))
-                else:
-                    st.warning("请先填写原视频所在目录。")
-
-    else:
-        st.markdown("**📁 视频文件夹**")
-        vf_col1, vf_col2 = st.columns([5, 1])
-        with vf_col1:
-            video_folder = st.text_input(
-                "视频路径", label_visibility="collapsed",
-                placeholder="/Users/你的用户名/Videos/reels",
-                key="video_folder_path",
-            )
-        with vf_col2:
-            if st.button("📂", help="选择文件夹", key="pick_video"):
-                pick_folder_into("video_folder_path")
-
-        if video_folder:
-            uploaded_video_paths = find_video_files(video_folder)
-            source_folder = video_folder
-            if uploaded_video_paths:
-                st.markdown(
-                    f'<div class="info-bar info-bar-green">'
-                    f'<span>✅</span>'
-                    f'<span style="font-weight:500;">找到 {len(uploaded_video_paths)} 个视频文件</span>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    '<div class="info-bar info-bar-orange">'
-                    '<span>⚠️</span><span>该文件夹中没有找到视频文件</span>'
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
-
-        st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
-        st.markdown("**📂 成品文件夹** <span style='color:#94a3b8;font-size:0.8rem;'>（建议单独放打好水印的视频）</span>", unsafe_allow_html=True)
-        of_col1, of_col2 = st.columns([5, 1])
-        with of_col1:
-            output_folder = st.text_input(
-                "输出路径", label_visibility="collapsed",
-                placeholder="/Users/你的用户名/Downloads/打好水印",
-                key="output_folder_path_val",
-            )
-        with of_col2:
-            if st.button("📂", help="选择文件夹", key="pick_out_folder"):
-                pick_folder_into("output_folder_path_val")
-        quick_out_cols = st.columns(2)
-        with quick_out_cols[0]:
-            if st.button("用桌面/打好水印", use_container_width=True, key="use_desktop_output_folder"):
-                set_pending_path("output_folder_path_val", desktop_output_folder())
-        with quick_out_cols[1]:
-            if st.button("用视频文件夹/打好水印", use_container_width=True, key="use_video_output_folder"):
-                if video_folder:
-                    set_pending_path("output_folder_path_val", str(Path(video_folder) / "打好水印"))
-                else:
-                    st.warning("请先填写视频文件夹。")
-
-    videos = uploaded_video_paths
-
-    st.divider()
-
     # ── 命名映射 ──
     st.markdown('<div class="section-title">② 粘贴 Google Sheets 数据</div>', unsafe_allow_html=True)
     st.caption("从 Google Sheets 复制三列（序号 + 中文标题 + 英文文案），直接粘贴到下方")
@@ -887,9 +866,9 @@ with left_col:
     st.session_state.setdefault("voice_engine", "免费本地 Whisper")
     st.session_state.setdefault("local_whisper_model", "base")
     st.session_state.setdefault("voice_api_key", os.environ.get("OPENAI_API_KEY", ""))
-    st.session_state.setdefault("recognize_start_seconds", 10)
+    st.session_state.setdefault("recognize_start_seconds", 5)
     st.session_state.setdefault("recognize_end_seconds", 20)
-    st.session_state.setdefault("match_threshold", 0.8)
+    st.session_state.setdefault("match_threshold", 0.9)
     with st.expander("配对细节设置", expanded=False):
         if match_mode.startswith("语音识别"):
             voice_engine_options = ["免费本地 Whisper", "OpenAI API"]
@@ -1166,9 +1145,12 @@ with left_col:
                 return review_id_for(row_index, video_file, output_name)
 
             st.divider()
-            st.markdown('<div class="section-title">③ 映射预览</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">③ 配对预览</div>', unsafe_allow_html=True)
 
-            with st.expander("手动匹配 / 修正错配", expanded=bool(manual_assignments)):
+            with st.expander(
+                "手动匹配 / 修正错配",
+                expanded=bool(manual_assignments) or st.session_state.get("show_manual_match_for") is not None,
+            ):
                 if not ordered_video_files:
                     st.caption("当前没有可选视频。")
                 else:
@@ -1398,6 +1380,12 @@ with left_col:
                         disabled=True,
                         key=f"review_caption_text_{selected_index}",
                     )
+                if match_by_voice and (
+                    selected_item["row_index"] not in voice_assignments
+                    or not selected_item.get("voice_text")
+                ):
+                    if st.button("✋ 手动指定这条对应的视频", key="quick_manual_match_btn"):
+                        st.session_state["show_manual_match_for"] = selected_index
                 if selected_item.get("voice_text"):
                     st.text_area(
                         "识别到的英文语音",
@@ -1459,6 +1447,8 @@ with left_col:
                     st.warning(f"表格比视频多 {len(mapping_entries) - len(ordered_video_files)} 行，多出来的文案没有对应视频。")
 
             st.divider()
+            main_export_btn = st.button("🚀 一键导出", key="main_export_btn", use_container_width=True)
+            export_clicked = sidebar_export_btn or main_export_btn
 
             if matched_entries == 0:
                 if match_by_voice:
@@ -1550,11 +1540,7 @@ with left_col:
                     )
 
                     total_action_items = len(process_items) + len(skipped_existing_items)
-                    if total_action_items and path_ok and overwrite_confirmed and st.button(
-                        f"🚀 开始处理 {len(process_items)} 个视频" if process_items else f"查看 {len(skipped_existing_items)} 个已存在结果",
-                        type="primary",
-                        use_container_width=True,
-                    ):
+                    if total_action_items and path_ok and overwrite_confirmed and export_clicked:
                         out_path.mkdir(parents=True, exist_ok=True)
                         progress = st.progress(0)
                         status_text = st.empty()
@@ -1779,6 +1765,34 @@ with left_col:
 
 # ── 右栏：检查与预览 ──
 with right_col:
+    with st.expander("⚙️ 视频显示设置", expanded=False):
+        video_layout_choice = st.selectbox(
+            "检查视频大小",
+            ["标准", "大", "超大"],
+            key="review_video_layout",
+            help="会调整右侧检查区域的宽度；选择后页面会自动重排。",
+        )
+        default_width = {"标准": 520, "大": 680, "超大": 860}.get(video_layout_choice, 520)
+        review_video_width = st.slider(
+            "播放器宽度",
+            min_value=360,
+            max_value=980,
+            value=int(st.session_state.get("review_video_width", default_width)),
+            step=20,
+            key="review_video_width",
+        )
+        auto_play_review_video = st.checkbox(
+            "切到下一个后自动播放",
+            value=bool(st.session_state.get("auto_play_review_video", True)),
+            key="auto_play_review_video",
+            help="浏览器通常要求静音才能自动播放。",
+        )
+        mute_auto_play_review_video = st.checkbox(
+            "自动播放时静音",
+            value=bool(st.session_state.get("mute_auto_play_review_video", True)),
+            key="mute_auto_play_review_video",
+        )
+
     active_review = st.session_state.get("active_review_video") or {}
     active_review_path = active_review.get("path", "")
     showing_review_video = bool(active_review_path and os.path.isfile(active_review_path))
