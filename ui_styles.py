@@ -208,6 +208,14 @@ hr {
     margin-top: 4px;
 }
 
+.subsection-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #1D1D1F;
+    margin-bottom: 8px;
+    margin-top: 12px;
+}
+
 /* ── 状态徽标 ── */
 .badge {
     display: inline-flex;

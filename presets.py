@@ -42,7 +42,7 @@ DEFAULT_APP_SETTINGS = {
     "local_whisper_model": "base",
     "recognize_start_seconds": 5,
     "recognize_end_seconds": 20,
-    "match_threshold": 0.9,
+    "match_threshold": 0.85,
     "order_sort_mode": "文件名 A-Z",
     "naming_rule": "水印-序号-中文标题",
     "filename_length_label": "较长（推荐，约50个中文字符）",
