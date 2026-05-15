@@ -12,15 +12,41 @@ Google Drive 认证与上传模块
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import threading
+import warnings
 from pathlib import Path
 from typing import Optional
 
-_BASE = Path(__file__).parent
-TOKEN_PATH = _BASE / "token.json"
-CREDS_PATH = _BASE / "credentials.json"
+# 屏蔽 Python 3.9 EOL 的 FutureWarning（无害，仅版本提示）
+warnings.filterwarnings("ignore", category=FutureWarning, module="google")
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+def _app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).parent
+
+
+def _data_dir() -> Path:
+    if getattr(sys, "frozen", False) and os.name == "nt":
+        base = Path(os.environ.get("APPDATA", Path.home())) / "ReelsWatermarkTool"
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+    return Path(__file__).parent
+
+
+_BASE = _app_base_dir()
+_DATA = _data_dir()
+TOKEN_PATH = _DATA / "token.json"
+CREDS_PATH = _BASE / "credentials.json"
+OAUTH_ERROR_PATH = _DATA / ".oauth_error"
+FOLDERS_ERROR_PATH = _DATA / ".folders_error"
+
+SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+_oauth_lock = threading.Lock()   # 防止重复启动 OAuth 线程
+_oauth_running = False
 
 
 # ── 状态检查 ──────────────────────────────────────────────────
@@ -63,12 +89,18 @@ def get_account_email() -> str:
 # ── 认证流程 ──────────────────────────────────────────────────
 
 def start_oauth_flow() -> None:
-    """在后台线程中启动 OAuth 流程（会自动打开浏览器）"""
+    """在后台线程中启动 OAuth 流程（会自动打开浏览器），同时只允许一个流程运行"""
+    global _oauth_running
+    with _oauth_lock:
+        if _oauth_running:
+            return
+        _oauth_running = True
     t = threading.Thread(target=_oauth_thread, daemon=True)
     t.start()
 
 
 def _oauth_thread() -> None:
+    global _oauth_running
     try:
         from google_auth_oauthlib.flow import InstalledAppFlow
         flow = InstalledAppFlow.from_client_secrets_file(str(CREDS_PATH), SCOPES)
@@ -76,12 +108,15 @@ def _oauth_thread() -> None:
         TOKEN_PATH.write_text(creds.to_json())
     except Exception as e:
         # 把错误写到临时文件，让 UI 侧读取
-        (_BASE / ".oauth_error").write_text(str(e))
+        OAUTH_ERROR_PATH.write_text(str(e))
+    finally:
+        global _oauth_running
+        _oauth_running = False
 
 
 def get_oauth_error() -> str:
     """读取并清除 OAuth 错误信息（如有）"""
-    err_file = _BASE / ".oauth_error"
+    err_file = OAUTH_ERROR_PATH
     if err_file.exists():
         msg = err_file.read_text()
         err_file.unlink()
@@ -113,16 +148,38 @@ def list_folders() -> list[dict]:
     """返回 Drive 中所有文件夹 [{id, name}, ...]，按名称排序"""
     try:
         svc = _get_service()
-        results = svc.files().list(
-            q="mimeType='application/vnd.google-apps.folder' and trashed=false",
-            spaces="drive",
-            fields="files(id, name)",
-            pageSize=200,
-            orderBy="name",
-        ).execute()
-        return results.get("files", [])
-    except Exception:
+        all_folders = []
+        page_token = None
+        while True:
+            kwargs = dict(
+                q="mimeType='application/vnd.google-apps.folder' and trashed=false",
+                spaces="drive",
+                fields="nextPageToken, files(id, name)",
+                pageSize=200,
+                orderBy="name",
+            )
+            if page_token:
+                kwargs["pageToken"] = page_token
+            resp = svc.files().list(**kwargs).execute()
+            all_folders.extend(resp.get("files", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        return all_folders
+    except Exception as e:
+        # 将错误写入临时文件供 UI 读取
+        FOLDERS_ERROR_PATH.write_text(str(e))
         return []
+
+
+def get_folders_error() -> str:
+    """读取并清除文件夹加载错误信息（如有）"""
+    err_file = FOLDERS_ERROR_PATH
+    if err_file.exists():
+        msg = err_file.read_text()
+        err_file.unlink()
+        return msg
+    return ""
 
 
 def create_folder(name: str, parent_id: Optional[str] = None) -> Optional[str]:
@@ -159,14 +216,22 @@ def folder_link(folder_id: str) -> str:
 
 
 def copy_to_clipboard(text: str) -> None:
-    """将文本复制到 macOS 剪贴板"""
-    import subprocess
-    subprocess.run(["pbcopy"], input=text.encode(), check=False)
+    """将文本复制到系统剪贴板。"""
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["pbcopy"], input=text.encode(), check=False)
+        elif os.name == "nt":
+            subprocess.run(["clip"], input=text, text=True, check=False)
+        else:
+            subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=False)
+    except Exception:
+        pass
 
 
 def upload_file(
     local_path: str,
     folder_id: Optional[str] = None,
+    mime_type: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
     上传单个文件到 Drive。
@@ -184,7 +249,7 @@ def upload_file(
         # 大文件使用 resumable 分块上传
         media = MediaFileUpload(
             local_path,
-            mimetype="video/mp4",
+            mimetype=mime_type or "application/octet-stream",
             resumable=True,
             chunksize=8 * 1024 * 1024,  # 8MB 块
         )

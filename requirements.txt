@@ -4,3 +4,6 @@ Pillow
 google-auth
 google-auth-oauthlib
 google-api-python-client
+faster-whisper
+openai
+send2trash

@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
-PRESETS_FILE = Path(__file__).parent / "presets.json"
+
+def _settings_dir() -> Path:
+    if getattr(sys, "frozen", False) and os.name == "nt":
+        base = Path(os.environ.get("APPDATA", Path.home())) / "ReelsWatermarkTool"
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+    return Path(__file__).parent
+
+
+PRESETS_FILE = _settings_dir() / "presets.json"
 
 DEFAULT_SETTINGS = {
     "watermark_text": "@YourAccount",
@@ -19,8 +30,31 @@ DEFAULT_SETTINGS = {
     "volume": 1.0,
 }
 
+DEFAULT_APP_SETTINGS = {
+    "import_mode": "拖拽上传视频",
+    "source_folder_upload_val": str(Path.home() / "Downloads"),
+    "output_folder_upload_val": str(Path.home() / "Downloads" / "打好水印"),
+    "video_folder_path": "",
+    "output_folder_path_val": str(Path.home() / "Downloads" / "打好水印"),
+    "paste_data": "",
+    "match_mode": "语音识别自动配对（推荐）",
+    "voice_engine": "免费本地 Whisper",
+    "local_whisper_model": "base",
+    "recognize_start_seconds": 10,
+    "recognize_end_seconds": 20,
+    "match_threshold": 0.8,
+    "order_sort_mode": "文件名 A-Z",
+    "naming_rule": "水印-序号-中文标题",
+    "filename_length_label": "较长（推荐，约50个中文字符）",
+    "review_only_confirmed": True,
+    "move_to_trash": True,
+    "drive_target_folder_id": None,
+    "drive_target_folder_name": "",
+}
+
 DEFAULT_PRESETS = {
     "last_used": dict(DEFAULT_SETTINGS),
+    "app_settings": dict(DEFAULT_APP_SETTINGS),
     "presets": {
         "预设1": {"name": "预设1", "settings": dict(DEFAULT_SETTINGS)},
         "预设2": {"name": "预设2", "settings": dict(DEFAULT_SETTINGS)},
@@ -38,8 +72,12 @@ def load_all() -> dict:
                 data["last_used"] = dict(DEFAULT_SETTINGS)
             if "presets" not in data:
                 data["presets"] = DEFAULT_PRESETS["presets"]
+            if "app_settings" not in data:
+                data["app_settings"] = dict(DEFAULT_APP_SETTINGS)
             for key, val in DEFAULT_SETTINGS.items():
                 data["last_used"].setdefault(key, val)
+            for key, val in DEFAULT_APP_SETTINGS.items():
+                data["app_settings"].setdefault(key, val)
             return data
         except Exception:
             pass
@@ -55,6 +93,22 @@ def save_all(data: dict) -> None:
 def save_last_used(settings: dict) -> None:
     data = load_all()
     data["last_used"] = settings
+    save_all(data)
+
+
+def get_app_settings() -> dict:
+    data = load_all()
+    settings = dict(DEFAULT_APP_SETTINGS)
+    settings.update(data.get("app_settings", {}))
+    return settings
+
+
+def save_app_settings(settings: dict) -> None:
+    data = load_all()
+    current = dict(DEFAULT_APP_SETTINGS)
+    current.update(data.get("app_settings", {}))
+    current.update(settings)
+    data["app_settings"] = current
     save_all(data)
 
 

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import os
 import re
+import csv
+import io
 import subprocess
 import shutil
+import sys
 import tempfile
+from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -28,6 +32,20 @@ COLOR_MAP = {
 
 
 def _ffmpeg_bin() -> str:
+    exe_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    base_dirs = []
+    if getattr(sys, "frozen", False):
+        base_dirs.append(Path(sys.executable).resolve().parent)
+    base_dirs.extend([Path(__file__).resolve().parent, Path.cwd()])
+    for base in base_dirs:
+        for candidate in [
+            base / exe_name,
+            base / "bin" / exe_name,
+            base / "ffmpeg" / exe_name,
+            base / "ffmpeg" / "bin" / exe_name,
+        ]:
+            if candidate.is_file():
+                return str(candidate)
     found = shutil.which("ffmpeg")
     if found:
         return found
@@ -37,15 +55,29 @@ def _ffmpeg_bin() -> str:
     return "ffmpeg"
 
 
+def _ffprobe_bin() -> str:
+    ffmpeg = _ffmpeg_bin()
+    if os.path.basename(ffmpeg).lower() in {"ffmpeg", "ffmpeg.exe"}:
+        ffprobe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+        candidate = Path(ffmpeg).with_name(ffprobe_name)
+        if candidate.is_file():
+            return str(candidate)
+    found = shutil.which("ffprobe")
+    if found:
+        return found
+    return "ffprobe.exe" if os.name == "nt" else "ffprobe"
+
+
 def check_ffmpeg() -> bool:
-    return shutil.which("ffmpeg") is not None or any(
-        os.path.isfile(p) for p in ["/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"]
-    )
+    ffmpeg = _ffmpeg_bin()
+    return shutil.which(ffmpeg) is not None or os.path.isfile(ffmpeg)
 
 
 @lru_cache(maxsize=1)
 def check_videotoolbox() -> bool:
     """检测当前 FFmpeg 是否支持 Apple VideoToolbox（GPU 编码）"""
+    if sys.platform != "darwin":
+        return False
     try:
         result = subprocess.run(
             [_ffmpeg_bin(), "-encoders"],
@@ -76,13 +108,8 @@ def _get_video_size(input_path: str) -> tuple:
     """
     用 ffprobe 获取视频宽高，返回 (width, height) 或 (None, error_msg)
     """
-    ffmpeg = _ffmpeg_bin()
-    ffprobe = ffmpeg.replace("ffmpeg", "ffprobe")
-    if not os.path.isfile(ffprobe):
-        ffprobe = shutil.which("ffprobe") or ffprobe
-
     cmd = [
-        ffprobe,
+        _ffprobe_bin(),
         "-v", "error",
         "-select_streams", "v:0",
         "-show_entries", "stream=width,height",
@@ -101,6 +128,21 @@ def _get_video_size(input_path: str) -> tuple:
         return None, "读取视频信息超时"
     except Exception as e:
         return None, str(e)
+
+
+def _get_video_duration(input_path: str) -> float:
+    cmd = [
+        _ffprobe_bin(),
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(input_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return max(0.1, float(result.stdout.strip()))
+    except Exception:
+        return 10.0
 
 
 def _make_watermark_overlay(
@@ -194,6 +236,11 @@ def _friendly_error(stderr: str) -> str:
     return stderr.strip()[-200:] if stderr.strip() else "未知错误"
 
 
+def _transcription_timeout(duration: int) -> int:
+    """Timeout for audio extraction; full-video jobs need a wider window."""
+    return max(1800, duration + 120) if duration <= 0 else max(180, duration + 120)
+
+
 def generate_preview(
     input_path: str,
     output_image: str,
@@ -253,7 +300,7 @@ def add_watermark(
     encoder: str = "cpu",
     volume: float = 1.0,
 ) -> tuple:
-    """给视频添加文字水印（Pillow 生成水印层，FFmpeg overlay 合成）"""
+    """给视频添加文字水印。"""
     size = _get_video_size(input_path)
     if size[0] is None:
         return False, f"无法获取视频信息：{size[1]}"
@@ -276,11 +323,15 @@ def add_watermark(
         else:
             audio_args = ["-c:a", "copy"]
 
+        filter_complex = "[0:v][1:v]overlay=0:0[v]"
+        input_args = ["-i", str(input_path), "-i", overlay_path]
+        map_args = ["-map", "[v]", "-map", "0:a?"]
+
         cmd = [
             _ffmpeg_bin(),
-            "-i", str(input_path),
-            "-i", overlay_path,
-            "-filter_complex", "overlay=0:0",
+            *input_args,
+            "-filter_complex", filter_complex,
+            *map_args,
             *codec_args,
             *audio_args,
             "-y",
@@ -328,6 +379,194 @@ def generate_audio_preview(
         return False, str(e)
 
 
+def transcribe_video_openai(
+    input_path: str,
+    api_key: str,
+    start: int = 0,
+    duration: int = 90,
+    model: str = "gpt-4o-mini-transcribe",
+) -> tuple:
+    """提取视频音频并用 OpenAI 转文字，返回 (True, text) 或 (False, error)。"""
+    api_key = (api_key or "").strip()
+    if not api_key:
+        return False, "请先填写 OpenAI API Key"
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return False, "缺少 openai 依赖，请重新安装 requirements.txt"
+
+    audio_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            audio_path = tmp.name
+
+        start = max(0, int(start or 0))
+        duration = max(0, int(duration or 0))
+        cmd = [_ffmpeg_bin()]
+        if start > 0:
+            cmd.extend(["-ss", str(start)])
+        cmd.extend([
+            "-i", str(input_path),
+            "-vn",
+            "-ac", "1",
+            "-ar", "16000",
+        ])
+        if duration and duration > 0:
+            cmd.extend(["-t", str(duration)])
+        cmd.extend(["-y", audio_path])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=_transcription_timeout(duration))
+        if result.returncode != 0:
+            return False, _friendly_error(result.stderr)
+
+        client = OpenAI(api_key=api_key)
+        with open(audio_path, "rb") as audio_file:
+            transcription = client.audio.transcriptions.create(
+                model=model,
+                file=audio_file,
+                response_format="text",
+                language="en",
+            )
+
+        text = transcription if isinstance(transcription, str) else getattr(transcription, "text", "")
+        return True, (text or "").strip()
+    except subprocess.TimeoutExpired:
+        return False, "音频提取超时"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        if audio_path and os.path.exists(audio_path):
+            try:
+                os.unlink(audio_path)
+            except OSError:
+                pass
+
+
+@lru_cache(maxsize=2)
+def _local_whisper_model(model_size: str):
+    from faster_whisper import WhisperModel
+
+    model_source = _bundled_whisper_model_path(model_size) or model_size
+    return WhisperModel(model_source, device="cpu", compute_type="int8")
+
+
+def _bundled_whisper_model_path(model_size: str) -> str:
+    model_dir_name = f"faster-whisper-{model_size}"
+    base_dirs = []
+    if getattr(sys, "frozen", False):
+        base_dirs.append(Path(sys.executable).resolve().parent)
+    base_dirs.extend([Path(__file__).resolve().parent, Path.cwd()])
+
+    for base in base_dirs:
+        candidate = base / "models" / model_dir_name
+        if (candidate / "model.bin").is_file() and (candidate / "config.json").is_file():
+            return str(candidate)
+    return ""
+
+
+def transcribe_video_local_whisper(
+    input_path: str,
+    start: int = 0,
+    duration: int = 90,
+    model_size: str = "base",
+) -> tuple:
+    """提取视频音频并用本地 Whisper 转英文，返回 (True, text) 或 (False, error)。"""
+    model_size = (model_size or "base").strip().lower()
+    if model_size not in {"base", "small"}:
+        return False, "本地 Whisper 模型只能选择 base 或 small"
+
+    try:
+        import faster_whisper  # noqa: F401
+    except ImportError:
+        return False, "缺少 faster-whisper 依赖，请重新安装 requirements.txt"
+
+    audio_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            audio_path = tmp.name
+
+        start = max(0, int(start or 0))
+        duration = max(0, int(duration or 0))
+        cmd = [_ffmpeg_bin()]
+        if start > 0:
+            cmd.extend(["-ss", str(start)])
+        cmd.extend([
+            "-i", str(input_path),
+            "-vn",
+            "-ac", "1",
+            "-ar", "16000",
+        ])
+        if duration and duration > 0:
+            cmd.extend(["-t", str(duration)])
+        cmd.extend(["-y", audio_path])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=_transcription_timeout(duration))
+        if result.returncode != 0:
+            return False, _friendly_error(result.stderr)
+
+        model = _local_whisper_model(model_size)
+        segments, _info = model.transcribe(
+            audio_path,
+            language="en",
+            beam_size=5,
+            vad_filter=True,
+        )
+        text = " ".join(segment.text.strip() for segment in segments if segment.text.strip())
+        return True, text.strip()
+    except subprocess.TimeoutExpired:
+        return False, "音频提取超时"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        if audio_path and os.path.exists(audio_path):
+            try:
+                os.unlink(audio_path)
+            except OSError:
+                pass
+
+
+def _normalize_match_text(text: str) -> str:
+    """保留英文和数字，去掉空格标点，便于比较口播和英文文案。"""
+    return "".join(ch.lower() for ch in (text or "") if ch.isalnum())
+
+
+def _word_tokens(text: str) -> list:
+    return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+def _char_ngrams(text: str, size: int = 2) -> set:
+    if len(text) <= size:
+        return {text} if text else set()
+    return {text[i:i + size] for i in range(len(text) - size + 1)}
+
+
+def text_similarity(left: str, right: str) -> float:
+    """返回 0~1 的文本相似度，用于英文语音识别结果和英文文案匹配。"""
+    a = _normalize_match_text(left)
+    b = _normalize_match_text(right)
+    if not a or not b:
+        return 0.0
+    if a in b or b in a:
+        return 0.98
+
+    sequence_score = SequenceMatcher(None, a, b).ratio()
+    a_grams = _char_ngrams(a)
+    b_grams = _char_ngrams(b)
+    gram_score = len(a_grams & b_grams) / len(a_grams | b_grams) if a_grams and b_grams else 0.0
+
+    left_words = _word_tokens(left)
+    right_words = _word_tokens(right)
+    word_score = 0.0
+    if left_words and right_words:
+        left_set = set(left_words)
+        right_set = set(right_words)
+        # 视频只识别中间片段时，用 overlap coefficient 比完整文本 Jaccard 更宽容。
+        word_score = len(left_set & right_set) / min(len(left_set), len(right_set))
+
+    return max(sequence_score, gram_score, word_score)
+
+
 def _crf_to_bitrate(crf: int, width: int, height: int) -> str:
     """将 CRF 值近似转换为 VideoToolbox 码率（基于分辨率）"""
     pixels = width * height
@@ -340,24 +579,66 @@ def _crf_to_bitrate(crf: int, width: int, height: int) -> str:
     return f"{kbps}k"
 
 
+def _looks_like_sequence(value: str) -> bool:
+    value = (value or "").strip()
+    return bool(re.fullmatch(r"\d+(?:[.\-]\d+)*[A-Za-z]?", value))
+
+
+def _looks_like_header(parts: list) -> bool:
+    if parts and _looks_like_sequence(parts[0]):
+        return False
+    head = " ".join((part or "").strip().lower() for part in parts[:3])
+    return any(word in head for word in ("序号", "编号", "中文", "英文", "chinese", "english"))
+
+
+def parse_mapping_rows(text: str) -> list:
+    """解析粘贴的 Google Sheets 数据，支持：序号 + 中文标题 + 英文文案。"""
+    rows = []
+    raw_text = (text or "").strip()
+    if not raw_text:
+        return rows
+
+    delimiter = "\t" if "\t" in raw_text else ","
+    try:
+        parsed_rows = list(csv.reader(io.StringIO(raw_text), delimiter=delimiter))
+    except csv.Error:
+        parsed_rows = [line.split(delimiter) for line in raw_text.splitlines()]
+
+    for raw_parts in parsed_rows:
+        parts = [str(part).strip() for part in raw_parts]
+        parts = [part for part in parts if part]
+        if not parts:
+            continue
+        if _looks_like_header(parts):
+            continue
+
+        first = parts[0]
+        starts_new_row = _looks_like_sequence(first) or len(parts) >= 3
+
+        if starts_new_row and len(parts) >= 2:
+            seq = first
+            name = parts[1]
+            caption = delimiter.join(parts[2:]).strip() if len(parts) >= 3 else ""
+            if seq and name:
+                rows.append({"seq": seq, "name": name, "caption": caption})
+            continue
+
+        # 容错：英文文案单元格里的换行如果没有被表格软件正确加引号，
+        # 会被拆成新行。非序号开头的行并回上一条英文文案。
+        if rows:
+            continuation = delimiter.join(parts).strip()
+            if continuation:
+                old_caption = rows[-1].get("caption", "")
+                rows[-1]["caption"] = (old_caption + "\n" + continuation).strip()
+
+    return rows
+
+
 def parse_mapping(text: str) -> dict:
     """解析粘贴的 Google Sheets 数据（Tab 或逗号分隔）"""
     mapping = {}
-    for line in text.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if "\t" in line:
-            parts = line.split("\t", 1)
-        elif "," in line:
-            parts = line.split(",", 1)
-        else:
-            continue
-        if len(parts) == 2:
-            seq = parts[0].strip()
-            name = parts[1].strip()
-            if seq and name:
-                mapping[seq] = name
+    for row in parse_mapping_rows(text):
+        mapping[row["seq"]] = row["name"]
     return mapping
 
 
@@ -411,8 +692,27 @@ def match_all_videos(seq: str, videos: dict) -> list:
     return sorted(contains_matches, key=lambda p: p.stem)
 
 
-def sanitize_filename(name: str) -> str:
-    """清理文件名中的非法字符"""
-    for ch in '<>:"/\\|?*':
+def sanitize_filename(name: str, max_bytes: int = 160) -> str:
+    """清理文件名中的非法字符，并限制长度，兼顾 macOS 和 Windows。"""
+    for ch in '<>:"/\\|?*\n\r\t':
         name = name.replace(ch, "_")
-    return name.strip()
+    name = re.sub(r"\s+", " ", name).strip(" ._")
+
+    # 按字节截断（中文字符占 3 字节），保留完整字符不截断半个
+    encoded = name.encode("utf-8")
+    if len(encoded) > max_bytes:
+        truncated = encoded[:max_bytes]
+        # 确保截断点是合法 UTF-8 字符边界
+        name = truncated.decode("utf-8", errors="ignore")
+    name = name.strip(" ._")
+
+    reserved = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    }
+    if not name:
+        return "未命名"
+    if name.upper() in reserved:
+        return f"{name}_"
+    return name

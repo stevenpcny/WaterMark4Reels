@@ -1,7 +1,11 @@
 # 运行时生成
 presets.json
 token.json
+credentials.json
+used-credentials.json
+*credentials*.json
 install.log
+.folders_error
 .oauth_error
 .write_test
 
@@ -20,3 +24,9 @@ __pycache__/
 
 # 上传缓存
 reels_watermark_uploads/
+
+# 构建产物 / 测试缓存
+ReelsWatermarkTool-Windows-source.zip
+windows/__pycache__/
+.pytest_cache/
+.venv-test/
