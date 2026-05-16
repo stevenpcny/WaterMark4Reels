@@ -174,5 +174,33 @@ def copy_image_with_new_name(
     return dest
 
 
+def copy_all_images_preserve_names(
+    src_folder: Path,
+    dest_folder: Path,
+) -> dict[str, Path]:
+    """批量复制原文件夹中所有图片到目标文件夹，保留原名。
+    返回 {原始绝对路径: 目标路径}。已存在的目标文件会被覆盖以确保是最新拷贝。
+    """
+    dest_folder.mkdir(parents=True, exist_ok=True)
+    mapping: dict[str, Path] = {}
+    for src in find_image_files(src_folder):
+        dest = dest_folder / src.name
+        shutil.copy2(src, dest)
+        mapping[str(src)] = dest
+    return mapping
+
+
+def rename_in_folder(
+    folder_file: Path,
+    new_stem: str,
+) -> Path:
+    """把目标文件夹里已经存在的文件改名为 new_stem + 原扩展名。"""
+    new_path = folder_file.with_name(f"{new_stem}{folder_file.suffix.lower()}")
+    if new_path == folder_file:
+        return folder_file
+    folder_file.rename(new_path)
+    return new_path
+
+
 def make_frame_workdir() -> Path:
     return Path(tempfile.mkdtemp(prefix="watermark_frames_"))
