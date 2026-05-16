@@ -47,6 +47,7 @@ from image_matching import (
     make_frame_workdir,
 )
 from processing import (
+    burn_subtitles_for_output,
     build_process_items,
     detect_existing_outputs,
     infer_mime_type,
@@ -67,6 +68,10 @@ from presets import (
     get_preset_settings,
     DEFAULT_SETTINGS,
 )
+
+DEFAULT_SETTINGS.setdefault("burn_subtitles", False)
+
+MATCH_MODE_OPTIONS = ["语音识别自动配对（推荐）", "按视频顺序配对（不用改文件名）", "按序号/关键词匹配（原方式）"]
 
 st.set_page_config(
     page_title="Reels 水印工具",
@@ -211,6 +216,52 @@ def desktop_output_folder() -> str:
     return str(Path.home() / "Desktop" / "打好水印")
 
 
+def render_review_video_panel(
+    videos: dict,
+    review_video_width: int,
+    auto_play_review_video: bool,
+    mute_auto_play_review_video: bool,
+    panel_key: str = "default",
+) -> None:
+    active_review = st.session_state.get("active_review_video") or {}
+    active_review_path = active_review.get("path", "")
+    showing_review_video = bool(active_review_path and os.path.isfile(active_review_path))
+
+    if showing_review_video:
+        st.markdown('<div class="section-title">🎞️ 检查视频</div>', unsafe_allow_html=True)
+        st.video(
+            active_review_path,
+            autoplay=auto_play_review_video,
+            muted=mute_auto_play_review_video,
+            width=review_video_width,
+        )
+        if active_review.get("window"):
+            st.caption(f"建议重点听 {active_review['window']} 附近；匹配度：{active_review.get('score', '—')}。")
+        else:
+            st.caption("当前人工复核选中的视频。")
+        st.caption("播放器已预加载当前文件。")
+        if active_review.get("voice_text"):
+            with st.expander("识别到的英文语音", expanded=False):
+                st.write(active_review["voice_text"])
+    else:
+        st.markdown('<div class="section-title">🎞️ 检查视频</div>', unsafe_allow_html=True)
+        if videos:
+            first_video = sorted(videos.values(), key=lambda p: p.stem)[0]
+            st.video(str(first_video), muted=True, width=review_video_width)
+            st.caption("选择或确认某条配对后，这里会显示当前视频。")
+        else:
+            st.markdown(
+                '<div style="aspect-ratio:9/16;max-height:420px;'
+                'background:rgba(120,120,128,0.07);border-radius:16px;'
+                'border:1.5px dashed rgba(120,120,128,0.2);'
+                'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;">'
+                '<div style="font-size:3rem;opacity:0.35;">🎬</div>'
+                '<div style="color:#8E8E93;font-size:13px;font-weight:500;">上传视频后显示预览</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+
 # ══════════════════════════════════════
 # 初始化 session_state
 # ══════════════════════════════════════
@@ -245,6 +296,10 @@ if "recognition_defaults_v3" not in st.session_state:
     if st.session_state.get("match_threshold") in (0.8, 0.9):
         st.session_state["match_threshold"] = 0.85
     st.session_state["recognition_defaults_v3"] = True
+
+if st.session_state.get("match_mode") not in MATCH_MODE_OPTIONS:
+    st.session_state["match_mode"] = MATCH_MODE_OPTIONS[0]
+st.session_state.setdefault("auto_play_review_video", True)
 
 
 # ══════════════════════════════════════
@@ -390,6 +445,216 @@ with st.sidebar:
     preset_notice = st.session_state.pop("preset_notice", "")
     if preset_notice:
         st.success(preset_notice)
+
+    if settings_match("预设", "保存", "载入"):
+        with st.expander("预设", expanded=settings_expanded("预设", "保存", "载入", default=False)):
+            selected_slot_label = st.selectbox(
+                "选择预设",
+                options=preset_slots,
+                format_func=lambda k: f"{k} · {all_data['presets'][k]['name']}",
+                key="selected_slot",
+            )
+            selected_preset = all_data["presets"][selected_slot_label]
+            saved_settings = get_preset_settings(selected_slot_label) or dict(DEFAULT_SETTINGS)
+
+            st.caption(
+                f"已保存：{saved_settings.get('watermark_text', '') or '空水印'} · "
+                f"{saved_settings.get('position', '右下')} · "
+                f"{saved_settings.get('font_size', DEFAULT_SETTINGS['font_size'])}号 · "
+                f"{int(float(saved_settings.get('opacity', DEFAULT_SETTINGS['opacity'])) * 100)}%透明度"
+            )
+
+            preset_col_a, preset_col_b = st.columns(2)
+            with preset_col_a:
+                if st.button("载入预设", use_container_width=True, key="preset_load_btn"):
+                    st.session_state["pending_widget_settings"] = saved_settings
+                    st.session_state["preset_notice"] = f"已载入「{selected_preset['name']}」"
+                    st.rerun()
+            with preset_col_b:
+                if st.button("保存当前", use_container_width=True, key="preset_save_btn"):
+                    current = {k: st.session_state.get(k, DEFAULT_SETTINGS.get(k)) for k in DEFAULT_SETTINGS}
+                    save_preset(selected_slot_label, selected_preset["name"], current)
+                    st.session_state["preset_notice"] = f"已保存到「{selected_preset['name']}」"
+                    st.rerun()
+
+            new_name = st.text_input(
+                "预设名称",
+                value=selected_preset["name"],
+                key=f"rename_input_{selected_slot_label}",
+                placeholder="例如：右上角小字",
+            ).strip()
+            if st.button("保存名称", use_container_width=True, key="preset_rename_btn"):
+                if not new_name:
+                    st.warning("预设名称不能为空")
+                else:
+                    rename_preset(selected_slot_label, new_name)
+                    st.session_state["preset_notice"] = f"已重命名为「{new_name}」"
+                    st.rerun()
+
+    st.divider()
+    st.markdown("### 配对参数")
+    match_mode = st.radio(
+        "配对方式",
+        MATCH_MODE_OPTIONS,
+        horizontal=True,
+        help="视频有英文语音时，推荐先识别中间片段，再和第三列英文文案自动配对。",
+        key="match_mode",
+    )
+    order_sort_mode = "文件名 A-Z"
+    voice_engine = "免费本地 Whisper"
+    local_whisper_model = "base"
+    voice_api_key = ""
+    st.session_state.setdefault("voice_engine", "免费本地 Whisper")
+    st.session_state.setdefault("local_whisper_model", "base")
+    st.session_state.setdefault("voice_api_key", os.environ.get("OPENAI_API_KEY", ""))
+    st.session_state.setdefault("recognize_start_seconds", 5)
+    st.session_state.setdefault("recognize_end_seconds", 20)
+    st.session_state.setdefault("match_threshold", 0.85)
+    with st.expander("配对细节设置", expanded=False):
+        if match_mode.startswith("语音识别"):
+            voice_engine_options = ["免费本地 Whisper", "OpenAI API"]
+            if st.session_state.get("voice_engine") not in voice_engine_options:
+                st.session_state["voice_engine"] = voice_engine_options[0]
+            voice_engine = st.selectbox(
+                "语音识别方式",
+                voice_engine_options,
+                help="本地 Whisper 不需要 key；OpenAI API 更快更稳，但会按量计费。",
+                key="voice_engine",
+            )
+            if voice_engine == "免费本地 Whisper":
+                if st.session_state.get("local_whisper_model") not in ["base", "small"]:
+                    st.session_state["local_whisper_model"] = "base"
+                local_whisper_model = st.selectbox(
+                    "本地 Whisper 模型",
+                    ["base", "small"],
+                    help="base 更快更省资源；small 更准但更慢。首次使用会下载模型。",
+                    key="local_whisper_model",
+                )
+                st.caption("本地识别不需要 key。第一次使用某个模型会下载一次，之后可离线使用。")
+            else:
+                voice_api_key = st.text_input(
+                    "OpenAI API Key",
+                    type="password",
+                    placeholder="sk-...",
+                    help="用于把视频语音转成文字，只在你点击语音识别时使用。",
+                    key="voice_api_key",
+                )
+            range_col1, range_col2 = st.columns(2)
+            with range_col1:
+                recognize_start_seconds = st.number_input(
+                    "识别开始位置（秒）",
+                    min_value=0,
+                    step=5,
+                    help="头部经常重复时，把开始位置设到中间，例如 10 秒。",
+                    key="recognize_start_seconds",
+                )
+            with range_col2:
+                recognize_end_seconds = st.number_input(
+                    "识别结束位置（秒）",
+                    min_value=1,
+                    step=5,
+                    help="结束位置必须大于开始位置。",
+                    key="recognize_end_seconds",
+                )
+            match_threshold = st.slider(
+                "识别成功匹配度",
+                min_value=0.5,
+                max_value=0.95,
+                step=0.05,
+                format="%.2f",
+                help="达到这个匹配度才算自动识别成功；建议先用 0.80。",
+                key="match_threshold",
+            )
+        else:
+            recognize_start_seconds = st.session_state.get("recognize_start_seconds", 5)
+            recognize_end_seconds = st.session_state.get("recognize_end_seconds", 20)
+            match_threshold = st.session_state.get("match_threshold", 0.85)
+
+        st.session_state.setdefault("order_sort_mode", "文件名 A-Z")
+        if match_mode.startswith("按视频顺序"):
+            order_sort_options = ["文件名 A-Z", "修改时间：旧到新", "修改时间：新到旧"]
+            if st.session_state.get("order_sort_mode") not in order_sort_options:
+                st.session_state["order_sort_mode"] = order_sort_options[0]
+            order_sort_mode = st.selectbox(
+                "视频排序",
+                order_sort_options,
+                help="让这里的顺序和你表格里的文案顺序一致即可。",
+                key="order_sort_mode",
+            )
+
+        naming_rule_options = ["水印-序号-中文标题", "序号-中文标题", "中文标题", "中文标题-序号"]
+        if st.session_state.get("naming_rule") not in naming_rule_options:
+            st.session_state["naming_rule"] = naming_rule_options[0]
+        naming_rule = st.selectbox(
+            "视频命名规则",
+            naming_rule_options,
+            help="最终输出视频会使用第二列中文标题命名。你可以先在下方预览里审定输出文件名。",
+            key="naming_rule",
+        )
+        filename_length_options = ["较长（推荐，约50个中文字符）", "标准（约35个中文字符）", "很长（约65个中文字符）"]
+        if st.session_state.get("filename_length_label") not in filename_length_options:
+            st.session_state["filename_length_label"] = filename_length_options[0]
+        filename_length_label = st.selectbox(
+            "文件名长度",
+            filename_length_options,
+            help="会自动截断到 macOS/Windows 比较安全的长度，不使用完整英文文案做文件名。",
+            key="filename_length_label",
+        )
+        filename_max_bytes = {
+            "标准（约35个中文字符）": 110,
+            "较长（推荐，约50个中文字符）": 160,
+            "很长（约65个中文字符）": 210,
+        }[filename_length_label]
+
+    with st.expander("原图配对", expanded=False):
+        st.checkbox(
+            "自动原图匹配",
+            value=st.session_state.get("image_match_auto_run", True),
+            key="image_match_auto_run",
+            help="文案/视频配对完成后自动跑感知哈希匹配；未复核视频暂不参与。",
+        )
+        st.number_input(
+            "自动匹配阈值（汉明距离 ≤）",
+            min_value=4, max_value=32, step=2,
+            help="距离越小越严。talking-head 动画建议 16-20。",
+            key="image_match_auto_threshold",
+        )
+        st.number_input(
+            "需要复核的阈值（≤）",
+            min_value=8, max_value=40, step=2,
+            help="距离介于自动阈值和这个之间的会被标记为'需复核'。",
+            key="image_match_review_threshold",
+        )
+
+    st.divider()
+    st.markdown("### 视频显示")
+    with st.expander("⚙️ 视频显示设置", expanded=False):
+        video_layout_choice = st.selectbox(
+            "检查视频大小",
+            ["标准", "大", "超大"],
+            key="review_video_layout",
+            help="会调整右侧检查区域的宽度；选择后页面会自动重排。",
+        )
+        default_width = {"标准": 520, "大": 680, "超大": 860}.get(video_layout_choice, 520)
+        review_video_width = st.slider(
+            "播放器宽度",
+            min_value=360,
+            max_value=980,
+            value=int(st.session_state.get("review_video_width", default_width)),
+            step=20,
+            key="review_video_width",
+        )
+        auto_play_review_video = st.checkbox(
+            "切到下一个后自动播放",
+            value=bool(st.session_state.get("auto_play_review_video", True)),
+            key="auto_play_review_video",
+            help="浏览器通常要求静音才能自动播放。",
+        )
+        mute_auto_play_review_video = st.checkbox(
+            "自动播放时静音",
+            value=bool(st.session_state.get("mute_auto_play_review_video", False)),
+            key="mute_auto_play_review_video",
+        )
 
     st.divider()
     st.markdown("### Google Drive")
@@ -580,63 +845,25 @@ with st.sidebar:
                         st.session_state.pop("last_drive_count", None)
                         st.rerun()
 
-                if st.button("断开连接", use_container_width=True, key="drive_disconnect"):
-                    gdrive.revoke_auth()
-                    st.session_state.pop("drive_folders", None)
-                    st.session_state.pop("drive_target_folder_id", None)
-                    st.rerun()
+                col_sw, col_dc = st.columns(2)
+                with col_sw:
+                    if st.button("切换账号", use_container_width=True, key="drive_switch"):
+                        gdrive.revoke_auth()
+                        st.session_state.pop("drive_folders", None)
+                        st.session_state.pop("drive_target_folder_id", None)
+                        gdrive.start_oauth_flow()
+                        st.session_state["drive_oauth_pending"] = True
+                        st.rerun()
+                with col_dc:
+                    if st.button("断开连接", use_container_width=True, key="drive_disconnect"):
+                        gdrive.revoke_auth()
+                        st.session_state.pop("drive_folders", None)
+                        st.session_state.pop("drive_target_folder_id", None)
+                        st.rerun()
             else:
                 if st.button("🔗 连接 Google Drive", use_container_width=True, key="drive_connect"):
                     gdrive.start_oauth_flow()
                     st.session_state["drive_oauth_pending"] = True
-                    st.rerun()
-
-    st.divider()
-    st.markdown("### 预设")
-
-    if settings_match("预设", "保存", "载入"):
-        with st.expander("预设", expanded=settings_expanded("预设", "保存", "载入", default=False)):
-            selected_slot_label = st.selectbox(
-                "选择预设",
-                options=preset_slots,
-                format_func=lambda k: f"{k} · {all_data['presets'][k]['name']}",
-                key="selected_slot",
-            )
-            selected_preset = all_data["presets"][selected_slot_label]
-            saved_settings = get_preset_settings(selected_slot_label) or dict(DEFAULT_SETTINGS)
-
-            st.caption(
-                f"已保存：{saved_settings.get('watermark_text', '') or '空水印'} · "
-                f"{saved_settings.get('position', '右下')} · "
-                f"{saved_settings.get('font_size', DEFAULT_SETTINGS['font_size'])}号 · "
-                f"{int(float(saved_settings.get('opacity', DEFAULT_SETTINGS['opacity'])) * 100)}%透明度"
-            )
-
-            preset_col_a, preset_col_b = st.columns(2)
-            with preset_col_a:
-                if st.button("载入预设", use_container_width=True, key="preset_load_btn"):
-                    st.session_state["pending_widget_settings"] = saved_settings
-                    st.session_state["preset_notice"] = f"已载入「{selected_preset['name']}」"
-                    st.rerun()
-            with preset_col_b:
-                if st.button("保存当前", use_container_width=True, key="preset_save_btn"):
-                    current = {k: st.session_state.get(k, DEFAULT_SETTINGS.get(k)) for k in DEFAULT_SETTINGS}
-                    save_preset(selected_slot_label, selected_preset["name"], current)
-                    st.session_state["preset_notice"] = f"已保存到「{selected_preset['name']}」"
-                    st.rerun()
-
-            new_name = st.text_input(
-                "预设名称",
-                value=selected_preset["name"],
-                key=f"rename_input_{selected_slot_label}",
-                placeholder="例如：右上角小字",
-            ).strip()
-            if st.button("保存名称", use_container_width=True, key="preset_rename_btn"):
-                if not new_name:
-                    st.warning("预设名称不能为空")
-                else:
-                    rename_preset(selected_slot_label, new_name)
-                    st.session_state["preset_notice"] = f"已重命名为「{new_name}」"
                     st.rerun()
 
     st.divider()
@@ -655,6 +882,7 @@ save_last_used({
     "quality_label": quality_label,
     "encoder": encoder,
     "volume": volume,
+    "burn_subtitles": bool(st.session_state.get("burn_subtitles", False)),
 })
 
 
@@ -702,6 +930,8 @@ with left_col:
         "output_folder_upload_val",
         "output_folder_path_val",
         "video_folder_path",
+        "source_image_folder",
+        "drive_local_upload_folder",
     ):
         pending_key = f"pending_{path_key}"
         if pending_key in st.session_state:
@@ -853,7 +1083,8 @@ with left_col:
     videos = uploaded_video_paths
 
     # ── 原图文件夹（可选） ──
-    with st.expander("🖼️ 原图文件夹（可选，配对后自动重命名复制）", expanded=False):
+    _has_image_folder = bool((st.session_state.get("source_image_folder") or "").strip())
+    with st.expander("🖼️ 原图文件夹（可选，配对后自动重命名复制）", expanded=_has_image_folder):
         img_col1, img_col2 = st.columns([5, 1])
         with img_col1:
             source_image_folder = st.text_input(
@@ -880,21 +1111,6 @@ with left_col:
                     '</div>',
                     unsafe_allow_html=True,
                 )
-        thr_col1, thr_col2 = st.columns(2)
-        with thr_col1:
-            st.number_input(
-                "自动匹配阈值（汉明距离 ≤）",
-                min_value=4, max_value=32, step=2,
-                help="距离越小越严。talking-head 动画建议 16-20。",
-                key="image_match_auto_threshold",
-            )
-        with thr_col2:
-            st.number_input(
-                "需要复核的阈值（≤）",
-                min_value=8, max_value=40, step=2,
-                help="距离介于自动阈值和这个之间的会被标记为'需复核'。",
-                key="image_match_review_threshold",
-            )
 
     def _source_state_snapshot() -> dict:
         return {
@@ -904,6 +1120,20 @@ with left_col:
             "uploaded_names": set(st.session_state.get("uploaded_names", set())),
             "uploaded_video_path_cache": dict(st.session_state.get("uploaded_video_path_cache", {})),
         }
+
+    def _clear_source_scan_state() -> None:
+        preserved_paste_data = st.session_state.get("paste_data", "")
+        for state_key in (
+            "review_statuses",
+            "manual_video_assignments",
+            "active_review_video",
+            "voice_match_result",
+            "image_match_result",
+            "image_match_video_ids",
+            "image_match_overrides",
+        ):
+            st.session_state.pop(state_key, None)
+        st.session_state["paste_data"] = preserved_paste_data
 
     if import_mode == "拖拽上传视频":
         current_signature = str(hash(tuple(sorted(path.name for path in uploaded_video_paths.values()))))
@@ -923,9 +1153,7 @@ with left_col:
         clear_col, rollback_col = st.columns(2)
         with clear_col:
             if st.button("🗑️ 清空旧审核状态（继续）", use_container_width=True, key="clear_old_review_state_btn"):
-                st.session_state.setdefault("review_statuses", {}).clear()
-                st.session_state.setdefault("manual_video_assignments", {}).clear()
-                st.session_state.pop("active_review_video", None)
+                _clear_source_scan_state()
                 st.session_state["last_known_source_signature"] = current_signature
                 st.session_state["_last_known_source_values"] = _source_state_snapshot()
                 st.session_state.pop("_pending_source_rollback", None)
@@ -950,119 +1178,6 @@ with left_col:
         label_visibility="collapsed",
         key="paste_data",
     )
-
-    match_mode_options = ["语音识别自动配对（推荐）", "按视频顺序配对（不用改文件名）", "按序号/关键词匹配（原方式）"]
-    if st.session_state.get("match_mode") not in match_mode_options:
-        st.session_state["match_mode"] = match_mode_options[0]
-    match_mode = st.radio(
-        "配对方式",
-        match_mode_options,
-        horizontal=True,
-        help="视频有英文语音时，推荐先识别中间片段，再和第三列英文文案自动配对。",
-        key="match_mode",
-    )
-
-    order_sort_mode = "文件名 A-Z"
-    voice_engine = "免费本地 Whisper"
-    local_whisper_model = "base"
-    voice_api_key = ""
-    st.session_state.setdefault("voice_engine", "免费本地 Whisper")
-    st.session_state.setdefault("local_whisper_model", "base")
-    st.session_state.setdefault("voice_api_key", os.environ.get("OPENAI_API_KEY", ""))
-    st.session_state.setdefault("recognize_start_seconds", 5)
-    st.session_state.setdefault("recognize_end_seconds", 20)
-    st.session_state.setdefault("match_threshold", 0.85)
-    with st.expander("配对细节设置", expanded=False):
-        if match_mode.startswith("语音识别"):
-            voice_engine_options = ["免费本地 Whisper", "OpenAI API"]
-            if st.session_state.get("voice_engine") not in voice_engine_options:
-                st.session_state["voice_engine"] = voice_engine_options[0]
-            voice_engine = st.selectbox(
-                "语音识别方式",
-                voice_engine_options,
-                help="本地 Whisper 不需要 key；OpenAI API 更快更稳，但会按量计费。",
-                key="voice_engine",
-            )
-            if voice_engine == "免费本地 Whisper":
-                if st.session_state.get("local_whisper_model") not in ["base", "small"]:
-                    st.session_state["local_whisper_model"] = "base"
-                local_whisper_model = st.selectbox(
-                    "本地 Whisper 模型",
-                    ["base", "small"],
-                    help="base 更快更省资源；small 更准但更慢。首次使用会下载模型。",
-                    key="local_whisper_model",
-                )
-                st.caption("本地识别不需要 key。第一次使用某个模型会下载一次，之后可离线使用。")
-            else:
-                voice_api_key = st.text_input(
-                    "OpenAI API Key",
-                    type="password",
-                    placeholder="sk-...",
-                    help="用于把视频语音转成文字，只在你点击语音识别时使用。",
-                    key="voice_api_key",
-                )
-            range_col1, range_col2 = st.columns(2)
-            with range_col1:
-                recognize_start_seconds = st.number_input(
-                    "识别开始位置（秒）",
-                    min_value=0,
-                    step=5,
-                    help="头部经常重复时，把开始位置设到中间，例如 10 秒。",
-                    key="recognize_start_seconds",
-                )
-            with range_col2:
-                recognize_end_seconds = st.number_input(
-                    "识别结束位置（秒）",
-                    min_value=1,
-                    step=5,
-                    help="结束位置必须大于开始位置。",
-                    key="recognize_end_seconds",
-                )
-            match_threshold = st.slider(
-                "识别成功匹配度",
-                min_value=0.5,
-                max_value=0.95,
-                step=0.05,
-                format="%.2f",
-                help="达到这个匹配度才算自动识别成功；建议先用 0.80。",
-                key="match_threshold",
-            )
-
-        st.session_state.setdefault("order_sort_mode", "文件名 A-Z")
-        if match_mode.startswith("按视频顺序"):
-            order_sort_options = ["文件名 A-Z", "修改时间：旧到新", "修改时间：新到旧"]
-            if st.session_state.get("order_sort_mode") not in order_sort_options:
-                st.session_state["order_sort_mode"] = order_sort_options[0]
-            order_sort_mode = st.selectbox(
-                "视频排序",
-                order_sort_options,
-                help="让这里的顺序和你表格里的文案顺序一致即可。",
-                key="order_sort_mode",
-            )
-
-        naming_rule_options = ["水印-序号-中文标题", "序号-中文标题", "中文标题", "中文标题-序号"]
-        if st.session_state.get("naming_rule") not in naming_rule_options:
-            st.session_state["naming_rule"] = naming_rule_options[0]
-        naming_rule = st.selectbox(
-            "视频命名规则",
-            naming_rule_options,
-            help="最终输出视频会使用第二列中文标题命名。你可以先在下方预览里审定输出文件名。",
-            key="naming_rule",
-        )
-        filename_length_options = ["较长（推荐，约50个中文字符）", "标准（约35个中文字符）", "很长（约65个中文字符）"]
-        if st.session_state.get("filename_length_label") not in filename_length_options:
-            st.session_state["filename_length_label"] = filename_length_options[0]
-        filename_length_label = st.selectbox(
-            "文件名长度",
-            filename_length_options,
-            help="会自动截断到 macOS/Windows 比较安全的长度，不使用完整英文文案做文件名。",
-            key="filename_length_label",
-        )
-        filename_max_bytes = {
-            "标准（约35个中文字符）": 110,
-            "较长（推荐，约50个中文字符）": 160,
-            "很长（约65个中文字符）": 210,
-        }[filename_length_label]
 
     if paste_data and videos:
         mapping_rows = parse_mapping_rows(paste_data)
@@ -1225,7 +1340,7 @@ with left_col:
 
             st.divider()
             st.markdown('<div class="section-title">3️⃣ 配对与审核</div>', unsafe_allow_html=True)
-            st.markdown('<div class="subsection-title">📋 配对预览</div>', unsafe_allow_html=True)
+            st.markdown('<div class="subsection-title">📋 配对与人工复核</div>', unsafe_allow_html=True)
 
             with st.expander(
                 "手动匹配 / 修正错配",
@@ -1336,170 +1451,179 @@ with left_col:
                         })
 
             preview_df = _pd_dataframe(preview_rows)
-            st.dataframe(preview_df, use_container_width=True, hide_index=True)
-
-            if has_captions or match_by_voice:
-                st.download_button(
-                    "📥 下载配对表 CSV",
-                    data=preview_df.to_csv(index=False).encode("utf-8-sig"),
-                    file_name="视频文案配对表.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-            if has_captions:
-                st.markdown(
-                    '<div class="info-bar info-bar-green" style="margin-top:8px;">'
-                    '<span>📝</span><span>英文文案仅用于配对和复核；处理后不再自动生成同名 .txt 文件。</span>'
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
-
             review_statuses = st.session_state.setdefault("review_statuses", {})
             st.session_state.setdefault("review_only_confirmed", True)
             confirmed_count = 0
             problem_count = 0
             unchecked_count = 0
 
-            if review_items:
-                st.divider()
-                st.markdown('<div class="subsection-title">✅ 人工复核</div>', unsafe_allow_html=True)
-                confirmed_count = sum(1 for item in review_items if review_statuses.get(item["id"]) == "confirmed")
-                problem_count = sum(1 for item in review_items if review_statuses.get(item["id"]) == "problem")
-                unchecked_count = len(review_items) - confirmed_count - problem_count
+            review_ui_col, review_video_col = st.columns([1.45, 1], gap="large")
+            with review_ui_col:
+                st.dataframe(preview_df, use_container_width=True, hide_index=True)
 
-                st.markdown(
-                    f"""
-                    <div class="review-strip">
-                      <div class="review-chip"><span>已确认</span><strong>{confirmed_count}</strong></div>
-                      <div class="review-chip"><span>待复核</span><strong>{unchecked_count}</strong></div>
-                      <div class="review-chip"><span>有问题</span><strong>{problem_count}</strong></div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
+                if has_captions or match_by_voice:
+                    st.download_button(
+                        "📥 下载配对表 CSV",
+                        data=preview_df.to_csv(index=False).encode("utf-8-sig"),
+                        file_name="视频文案配对表.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+                if has_captions:
+                    st.markdown(
+                        '<div class="info-bar info-bar-green" style="margin-top:8px;">'
+                        '<span>📝</span><span>英文文案仅用于配对和复核；处理后不再自动生成同名 .txt 文件。</span>'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                if review_items:
+                    st.divider()
+                    confirmed_count = sum(1 for item in review_items if review_statuses.get(item["id"]) == "confirmed")
+                    problem_count = sum(1 for item in review_items if review_statuses.get(item["id"]) == "problem")
+                    unchecked_count = len(review_items) - confirmed_count - problem_count
+
+                    st.markdown(
+                        f"""
+                        <div class="review-strip">
+                          <div class="review-chip"><span>已确认</span><strong>{confirmed_count}</strong></div>
+                          <div class="review-chip"><span>待复核</span><strong>{unchecked_count}</strong></div>
+                          <div class="review-chip"><span>有问题</span><strong>{problem_count}</strong></div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    review_options = list(range(len(review_items)))
+                    pending_review_index = st.session_state.pop("pending_review_item_select", None)
+                    if pending_review_index is not None:
+                        st.session_state["review_item_select"] = max(
+                            0,
+                            min(int(pending_review_index), len(review_items) - 1),
+                        )
+                    if st.session_state.get("review_item_select") not in review_options:
+                        st.session_state["review_item_select"] = 0
+                    selector_col, gate_col = st.columns([3.4, 1.1])
+                    with selector_col:
+                        selected_index = st.selectbox(
+                            "选择要复核的视频",
+                            review_options,
+                            format_func=lambda idx: (
+                                f"{review_items[idx]['seq']} · {review_items[idx]['video_file'].name} → "
+                                f"{review_items[idx]['output_name']}"
+                            ),
+                            key="review_item_select",
+                        )
+                    with gate_col:
+                        review_only_confirmed = st.checkbox(
+                            "只处理已确认",
+                            key="review_only_confirmed",
+                            help="建议保持开启：人工确认后再打水印和改名，避免识别错配后批量输出。",
+                        )
+                    selected_item = review_items[selected_index]
+                    selected_status = review_statuses.get(selected_item["id"], "")
+                    selected_status_label = {
+                        "confirmed": "已确认通过",
+                        "problem": "已标记有问题",
+                    }.get(selected_status, "待复核")
+                    score_text = f"{selected_item['voice_score']:.0%}" if selected_item["voice_score"] is not None else "—"
+
+                    st.session_state["active_review_video"] = {
+                        "path": str(selected_item["video_file"]),
+                        "name": selected_item["video_file"].name,
+                        "caption": selected_item.get("caption", ""),
+                        "voice_text": selected_item.get("voice_text", ""),
+                        "score": score_text,
+                        "window": f"{st.session_state.get('recognize_start_seconds', 10)}-{st.session_state.get('recognize_end_seconds', 20)} 秒" if match_by_voice else "",
+                    }
+
+                    safe_status = html.escape(selected_status_label)
+                    safe_output_name = html.escape(selected_item["output_name"])
+                    st.markdown(
+                        f"""
+                        <div class="review-meta">
+                          <div class="review-meta-row">
+                            <div class="review-meta-label">状态</div>
+                            <div class="review-meta-value"><span class="review-status-pill">{safe_status}</span></div>
+                          </div>
+                          <div class="review-meta-row">
+                            <div class="review-meta-label">输出文件</div>
+                            <div class="review-meta-value">{safe_output_name}</div>
+                          </div>
+                          <div class="review-meta-row">
+                            <div class="review-meta-label">匹配度</div>
+                            <div class="review-meta-value">{score_text}</div>
+                          </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    st.caption("右侧面板显示当前选中视频；这里专注核对标题、文案和操作结果。")
+                    cn_col, en_col = st.columns(2)
+                    with cn_col:
+                        st.text_area(
+                            "中文文案 / 标题",
+                            value=selected_item["chinese_title"] or "",
+                            height=180,
+                            disabled=True,
+                            key=f"review_chinese_text_{selected_index}",
+                        )
+                    with en_col:
+                        st.text_area(
+                            "英文文案（表格原文）",
+                            value=selected_item.get("caption", ""),
+                            height=180,
+                            disabled=True,
+                            key=f"review_caption_text_{selected_index}",
+                        )
+                    if match_by_voice and (
+                        selected_item["row_index"] not in voice_assignments
+                        or not selected_item.get("voice_text")
+                    ):
+                        if st.button("✋ 手动指定这条对应的视频", key="quick_manual_match_btn"):
+                            st.session_state["show_manual_match_for"] = selected_index
+                    if selected_item.get("voice_text"):
+                        st.text_area(
+                            "识别到的英文语音",
+                            value=selected_item["voice_text"],
+                            height=110,
+                            disabled=True,
+                            key=f"review_voice_text_{selected_index}",
+                        )
+
+                        def _next_review_index_after(current_index: int) -> int:
+                            if len(review_items) <= 1:
+                                return current_index
+                            for step in range(1, len(review_items) + 1):
+                                next_index = (current_index + step) % len(review_items)
+                                next_status = review_statuses.get(review_items[next_index]["id"])
+                                if next_status not in {"confirmed", "problem"}:
+                                    return next_index
+                            return (current_index + 1) % len(review_items)
+
+                        ba, bb, bc = st.columns(3)
+                        if ba.button("确认通过", type="primary", use_container_width=True, key=f"review_ok_{selected_item['id']}"):
+                            review_statuses[selected_item["id"]] = "confirmed"
+                            st.session_state["pending_review_item_select"] = _next_review_index_after(selected_index)
+                            st.rerun()
+                        if bb.button("标记有问题", use_container_width=True, key=f"review_bad_{selected_item['id']}"):
+                            review_statuses[selected_item["id"]] = "problem"
+                            st.session_state["pending_review_item_select"] = _next_review_index_after(selected_index)
+                            st.rerun()
+                        if bc.button("取消标记", use_container_width=True, key=f"review_clear_{selected_item['id']}"):
+                            review_statuses.pop(selected_item["id"], None)
+                            st.rerun()
+                else:
+                    st.session_state.pop("active_review_video", None)
+                    review_only_confirmed = bool(st.session_state.get("review_only_confirmed", True))
+            with review_video_col:
+                render_review_video_panel(
+                    videos,
+                    review_video_width,
+                    auto_play_review_video,
+                    mute_auto_play_review_video,
+                    panel_key="manual_review",
                 )
-
-                review_options = list(range(len(review_items)))
-                pending_review_index = st.session_state.pop("pending_review_item_select", None)
-                if pending_review_index is not None:
-                    st.session_state["review_item_select"] = max(
-                        0,
-                        min(int(pending_review_index), len(review_items) - 1),
-                    )
-                if st.session_state.get("review_item_select") not in review_options:
-                    st.session_state["review_item_select"] = 0
-                selector_col, gate_col = st.columns([3.4, 1.1])
-                with selector_col:
-                    selected_index = st.selectbox(
-                        "选择要复核的视频",
-                        review_options,
-                        format_func=lambda idx: (
-                            f"{review_items[idx]['seq']} · {review_items[idx]['video_file'].name} → "
-                            f"{review_items[idx]['output_name']}"
-                        ),
-                        key="review_item_select",
-                    )
-                with gate_col:
-                    review_only_confirmed = st.checkbox(
-                        "只处理已确认",
-                        key="review_only_confirmed",
-                        help="建议保持开启：人工确认后再打水印和改名，避免识别错配后批量输出。",
-                    )
-                selected_item = review_items[selected_index]
-                selected_status = review_statuses.get(selected_item["id"], "")
-                selected_status_label = {
-                    "confirmed": "已确认通过",
-                    "problem": "已标记有问题",
-                }.get(selected_status, "待复核")
-                score_text = f"{selected_item['voice_score']:.0%}" if selected_item["voice_score"] is not None else "—"
-
-                st.session_state["active_review_video"] = {
-                    "path": str(selected_item["video_file"]),
-                    "name": selected_item["video_file"].name,
-                    "caption": selected_item.get("caption", ""),
-                    "voice_text": selected_item.get("voice_text", ""),
-                    "score": score_text,
-                    "window": f"{st.session_state.get('recognize_start_seconds', 10)}-{st.session_state.get('recognize_end_seconds', 20)} 秒" if match_by_voice else "",
-                }
-
-                safe_status = html.escape(selected_status_label)
-                safe_output_name = html.escape(selected_item["output_name"])
-                st.markdown(
-                    f"""
-                    <div class="review-meta">
-                      <div class="review-meta-row">
-                        <div class="review-meta-label">状态</div>
-                        <div class="review-meta-value"><span class="review-status-pill">{safe_status}</span></div>
-                      </div>
-                      <div class="review-meta-row">
-                        <div class="review-meta-label">输出文件</div>
-                        <div class="review-meta-value">{safe_output_name}</div>
-                      </div>
-                      <div class="review-meta-row">
-                        <div class="review-meta-label">匹配度</div>
-                        <div class="review-meta-value">{score_text}</div>
-                      </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                st.caption("右侧面板显示当前选中视频；这里专注核对标题、文案和操作结果。")
-                cn_col, en_col = st.columns(2)
-                with cn_col:
-                    st.text_area(
-                        "中文文案 / 标题",
-                        value=selected_item["chinese_title"] or "",
-                        height=180,
-                        disabled=True,
-                        key=f"review_chinese_text_{selected_index}",
-                    )
-                with en_col:
-                    st.text_area(
-                        "英文文案（表格原文）",
-                        value=selected_item.get("caption", ""),
-                        height=180,
-                        disabled=True,
-                        key=f"review_caption_text_{selected_index}",
-                    )
-                if match_by_voice and (
-                    selected_item["row_index"] not in voice_assignments
-                    or not selected_item.get("voice_text")
-                ):
-                    if st.button("✋ 手动指定这条对应的视频", key="quick_manual_match_btn"):
-                        st.session_state["show_manual_match_for"] = selected_index
-                if selected_item.get("voice_text"):
-                    st.text_area(
-                        "识别到的英文语音",
-                        value=selected_item["voice_text"],
-                        height=110,
-                        disabled=True,
-                        key=f"review_voice_text_{selected_index}",
-                    )
-
-                    def _next_review_index_after(current_index: int) -> int:
-                        if len(review_items) <= 1:
-                            return current_index
-                        for step in range(1, len(review_items) + 1):
-                            next_index = (current_index + step) % len(review_items)
-                            next_status = review_statuses.get(review_items[next_index]["id"])
-                            if next_status not in {"confirmed", "problem"}:
-                                return next_index
-                        return (current_index + 1) % len(review_items)
-
-                    ba, bb, bc = st.columns(3)
-                    if ba.button("确认通过", type="primary", use_container_width=True, key=f"review_ok_{selected_item['id']}"):
-                        review_statuses[selected_item["id"]] = "confirmed"
-                        st.session_state["pending_review_item_select"] = _next_review_index_after(selected_index)
-                        st.rerun()
-                    if bb.button("标记有问题", use_container_width=True, key=f"review_bad_{selected_item['id']}"):
-                        review_statuses[selected_item["id"]] = "problem"
-                        st.session_state["pending_review_item_select"] = _next_review_index_after(selected_index)
-                        st.rerun()
-                    if bc.button("取消标记", use_container_width=True, key=f"review_clear_{selected_item['id']}"):
-                        review_statuses.pop(selected_item["id"], None)
-                        st.rerun()
-            else:
-                st.session_state.pop("active_review_video", None)
-                review_only_confirmed = bool(st.session_state.get("review_only_confirmed", True))
 
             matched_entries = sum(
                 1 for row_index, row in enumerate(mapping_entries)
@@ -1551,11 +1675,44 @@ with left_col:
                     if st.button("清空结果", use_container_width=True, key="clear_image_match_btn"):
                         st.session_state.pop("image_match_result", None)
                         st.session_state.pop("image_match_overrides", None)
+                        st.session_state.pop("image_match_last_fingerprint", None)
                         st.rerun()
 
+                # 自动原图匹配：未复核视频不参与；fingerprint 变化时跑一次
+                _auto_run_enabled = bool(st.session_state.get("image_match_auto_run", True))
+                _auto_run_videos = [
+                    it for it in review_items
+                    if review_statuses.get(it["id"]) == "confirmed"
+                ]
+                _auto_thr_now = int(st.session_state.get("image_match_auto_threshold", 18))
+                _review_thr_now = int(st.session_state.get("image_match_review_threshold", 24))
+                _auto_fp = (
+                    _image_folder,
+                    tuple(sorted(it["id"] for it in _auto_run_videos)),
+                    _auto_thr_now,
+                    _review_thr_now,
+                )
+                _last_fp = st.session_state.get("image_match_last_fingerprint")
+                _auto_trigger = (
+                    _auto_run_enabled
+                    and _auto_run_videos
+                    and _auto_fp != _last_fp
+                )
+
                 if do_image_match and _img_videos_for_match:
-                    auto_thr = int(st.session_state.get("image_match_auto_threshold", 18))
-                    review_thr = int(st.session_state.get("image_match_review_threshold", 24))
+                    _videos_to_match = _img_videos_for_match
+                    _run_match = True
+                elif _auto_trigger:
+                    _videos_to_match = _auto_run_videos
+                    _run_match = True
+                    st.info(f"🖼️ 自动原图匹配中（{len(_auto_run_videos)} 个已复核视频）...")
+                else:
+                    _videos_to_match = []
+                    _run_match = False
+
+                if _run_match:
+                    auto_thr = _auto_thr_now
+                    review_thr = _review_thr_now
                     progress = st.progress(0)
                     status_text = st.empty()
                     work_dir = make_frame_workdir()
@@ -1568,15 +1725,15 @@ with left_col:
                             h = hash_image(img_path)
                             if h:
                                 image_hashes[str(img_path)] = h
-                            progress.progress((idx + 1) / max(1, total_imgs + len(_img_videos_for_match)))
+                            progress.progress((idx + 1) / max(1, total_imgs + len(_videos_to_match)))
 
                         video_hashes: dict[str, list[tuple[str, str]]] = {}
-                        for vidx, item in enumerate(_img_videos_for_match):
-                            status_text.write(f"抽帧并哈希 {vidx+1}/{len(_img_videos_for_match)}：{item['video_file'].name}")
+                        for vidx, item in enumerate(_videos_to_match):
+                            status_text.write(f"抽帧并哈希 {vidx+1}/{len(_videos_to_match)}：{item['video_file'].name}")
                             vh = hash_video_frames(item["video_file"], work_dir)
                             if vh:
                                 video_hashes[item["id"]] = vh
-                            progress.progress((total_imgs + vidx + 1) / max(1, total_imgs + len(_img_videos_for_match)))
+                            progress.progress((total_imgs + vidx + 1) / max(1, total_imgs + len(_videos_to_match)))
 
                         result = assign_videos_to_images(
                             video_hashes, image_hashes,
@@ -1584,8 +1741,9 @@ with left_col:
                             review_threshold=review_thr,
                         )
                         st.session_state["image_match_result"] = result
-                        st.session_state["image_match_video_ids"] = [it["id"] for it in _img_videos_for_match]
+                        st.session_state["image_match_video_ids"] = [it["id"] for it in _videos_to_match]
                         st.session_state["image_match_overrides"] = {}
+                        st.session_state["image_match_last_fingerprint"] = _auto_fp
                     finally:
                         try:
                             import shutil as _sh
@@ -1707,7 +1865,9 @@ with left_col:
 
             st.divider()
             main_export_btn = st.button("🚀 一键导出", key="main_export_btn", use_container_width=True)
-            export_clicked = sidebar_export_btn or main_export_btn
+            if sidebar_export_btn or main_export_btn:
+                st.session_state["pending_export_clicked"] = True
+            export_clicked = bool(st.session_state.get("pending_export_clicked", False))
 
             if matched_entries == 0:
                 if match_by_voice:
@@ -1797,9 +1957,14 @@ with left_col:
                         key="move_to_trash",
                         help="仅移动成功打水印的原始视频，未成功的文件不会被移动。可从回收站恢复。",
                     )
+                    burn_subtitles = st.checkbox(
+                        "烧录字幕（Hormozi 风格）",
+                        key="burn_subtitles",
+                    )
 
                     total_action_items = len(process_items) + len(skipped_existing_items)
                     if total_action_items and path_ok and overwrite_confirmed and export_clicked:
+                        st.session_state.pop("pending_export_clicked", None)
                         out_path.mkdir(parents=True, exist_ok=True)
                         progress = st.progress(0)
                         status_text = st.empty()
@@ -1855,6 +2020,19 @@ with left_col:
                                 encoder=encoder,
                                 volume=volume,
                             )
+
+                            if success and burn_subtitles:
+                                status_text.markdown(
+                                    f'<div class="info-bar info-bar-blue">'
+                                    f'<span>⚙️</span>'
+                                    f'<span>正在烧录字幕 ({done+1}/{total})：{video_file.name}</span>'
+                                    f'</div>',
+                                    unsafe_allow_html=True,
+                                )
+                                success, error = burn_subtitles_for_output(
+                                    output_file,
+                                    burn_subtitles=burn_subtitles,
+                                )
 
                             if success:
                                 src_image = _image_for_review_id(item.get("review_id", ""))
@@ -1977,81 +2155,104 @@ with left_col:
 
                         st.balloons()
 
-                        # ── Google Drive 自动上传 ──
                         successful_files = [r for r in results if "✅" in r["结果"]]
-                        if successful_files and gdrive.is_authenticated():
-                            st.divider()
-                            st.markdown('<div class="section-title">☁️ 上传到 Google Drive</div>', unsafe_allow_html=True)
+                        if successful_files:
+                            upload_file_names = successful_upload_file_names(successful_files)
+                            st.session_state["pending_drive_upload"] = {
+                                "out_path": str(out_path),
+                                "files": upload_file_names,
+                                "folder_name": out_path.name,
+                            }
 
-                            target_folder_id   = st.session_state.get("drive_target_folder_id")
-                            target_folder_name = st.session_state.get("drive_target_folder_name", "")
+    pending_drive_upload = st.session_state.get("pending_drive_upload")
+    if pending_drive_upload and gdrive.is_authenticated():
+        st.divider()
+        st.markdown('<div class="section-title">☁️ 上传到 Google Drive</div>', unsafe_allow_html=True)
 
-                            if target_folder_id:
-                                folder_id   = target_folder_id
-                                folder_name = target_folder_name
-                            else:
-                                # 未选择文件夹时兜底：用输出文件夹名新建
-                                folder_name = out_path.name
-                                with st.spinner(f"正在 Drive 新建文件夹「{folder_name}」…"):
-                                    folder_id = gdrive.create_folder(folder_name)
+        upload_file_names = pending_drive_upload.get("files", [])
+        folder_name_hint = pending_drive_upload.get("folder_name", "")
+        st.info(f"待上传 {len(upload_file_names)} 个文件到 Drive 文件夹「{folder_name_hint}」。")
 
-                            if not folder_id:
-                                st.error("Drive 文件夹不可用，请在侧边栏选择或新建一个文件夹")
-                            else:
-                                gdrive.make_shareable(folder_id)
-                                link = gdrive.folder_link(folder_id)
+        upload_col, cancel_col = st.columns(2)
+        with upload_col:
+            upload_pending_drive = st.button("上传到 Drive", use_container_width=True, key="upload_pending_drive")
+        with cancel_col:
+            cancel_pending_drive = st.button("取消上传", use_container_width=True, key="cancel_pending_drive")
 
-                                up_progress = st.progress(0)
-                                up_status = st.empty()
-                                upload_results = []
+        if cancel_pending_drive:
+            st.session_state.pop("pending_drive_upload", None)
+            st.rerun()
 
-                                upload_file_names = successful_upload_file_names(successful_files)
+        if upload_pending_drive:
+            out_path = Path(pending_drive_upload["out_path"])
+            target_folder_id = st.session_state.get("drive_target_folder_id")
+            target_folder_name = st.session_state.get("drive_target_folder_name", "")
 
-                                for i, file_name in enumerate(upload_file_names):
-                                    file_path = out_path / file_name
-                                    up_status.markdown(
-                                        f'<div class="info-bar info-bar-blue">'
-                                        f'<span>☁️</span>'
-                                        f'<span>上传中 ({i+1}/{len(upload_file_names)})：{file_name}</span>'
-                                        f'</div>',
-                                        unsafe_allow_html=True,
-                                    )
-                                    ok, err = gdrive.upload_file(
-                                        str(file_path),
-                                        folder_id,
-                                        mime_type=infer_mime_type(file_path),
-                                    )
-                                    upload_results.append({
-                                        "文件": file_name,
-                                        "上传": "✅" if ok else f"❌ {err}",
-                                    })
-                                    up_progress.progress((i + 1) / len(upload_file_names))
+            if target_folder_id:
+                folder_id = target_folder_id
+                folder_name = target_folder_name
+            else:
+                folder_name = folder_name_hint or out_path.name
+                with st.spinner(f"正在 Drive 新建文件夹「{folder_name}」…"):
+                    folder_id = gdrive.create_folder(folder_name)
 
-                                up_status.empty()
-                                up_progress.empty()
+            if not folder_id:
+                st.error("Drive 文件夹不可用，请在侧边栏选择或新建一个文件夹")
+            else:
+                gdrive.make_shareable(folder_id)
+                link = gdrive.folder_link(folder_id)
 
-                                up_ok = sum(1 for r in upload_results if "✅" in r["上传"])
-                                st.dataframe(_pd_dataframe(upload_results), use_container_width=True, hide_index=True)
+                up_progress = st.progress(0)
+                up_status = st.empty()
+                upload_results = []
 
-                                # 复制链接到剪贴板，并存入 session_state 常驻显示
-                                gdrive.copy_to_clipboard(link)
-                                st.session_state["last_drive_link"] = link
-                                st.session_state["last_drive_folder"] = folder_name
-                                st.session_state["last_drive_count"] = f"{up_ok}/{len(upload_file_names)}"
+                for i, file_name in enumerate(upload_file_names):
+                    file_path = out_path / file_name
+                    up_status.markdown(
+                        f'<div class="info-bar info-bar-blue">'
+                        f'<span>☁️</span>'
+                        f'<span>上传中 ({i+1}/{len(upload_file_names)})：{file_name}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                    ok, err = gdrive.upload_file(
+                        str(file_path),
+                        folder_id,
+                        mime_type=infer_mime_type(file_path),
+                    )
+                    upload_results.append({
+                        "文件": file_name,
+                        "上传": "✅" if ok else f"❌ {err}",
+                    })
+                    up_progress.progress((i + 1) / len(upload_file_names))
 
-                                st.markdown(
-                                    f'<div style="background:#fff;border-radius:16px;padding:16px 18px;'
-                                    f'border:0.5px solid rgba(0,122,255,0.25);'
-                                    f'box-shadow:0 1px 4px rgba(0,0,0,0.07);">'
-                                    f'<div style="font-weight:600;color:#1D1D1F;font-size:15px;margin-bottom:6px;">'
-                                    f'☁️ 上传完成 — {up_ok}/{len(upload_file_names)} 个文件 → {folder_name}</div>'
-                                    f'<div style="font-size:13px;color:#8E8E93;margin-bottom:6px;">📋 Drive 文件夹链接已复制到剪贴板</div>'
-                                    f'<a href="{link}" target="_blank" style="font-size:13px;color:#007AFF;text-decoration:none;">{link}</a>'
-                                    f'</div>',
-                                    unsafe_allow_html=True,
-                                )
+                up_status.empty()
+                up_progress.empty()
 
-    elif paste_data and not videos:
+                up_ok = sum(1 for r in upload_results if "✅" in r["上传"])
+                st.dataframe(_pd_dataframe(upload_results), use_container_width=True, hide_index=True)
+
+                # 复制链接到剪贴板，并存入 session_state 常驻显示
+                gdrive.copy_to_clipboard(link)
+                st.session_state["last_drive_link"] = link
+                st.session_state["last_drive_folder"] = folder_name
+                st.session_state["last_drive_count"] = f"{up_ok}/{len(upload_file_names)}"
+
+                st.markdown(
+                    f'<div style="background:#fff;border-radius:16px;padding:16px 18px;'
+                    f'border:0.5px solid rgba(0,122,255,0.25);'
+                    f'box-shadow:0 1px 4px rgba(0,0,0,0.07);">'
+                    f'<div style="font-weight:600;color:#1D1D1F;font-size:15px;margin-bottom:6px;">'
+                    f'☁️ 上传完成 — {up_ok}/{len(upload_file_names)} 个文件 → {folder_name}</div>'
+                    f'<div style="font-size:13px;color:#8E8E93;margin-bottom:6px;">📋 Drive 文件夹链接已复制到剪贴板</div>'
+                    f'<a href="{link}" target="_blank" style="font-size:13px;color:#007AFF;text-decoration:none;">{link}</a>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                st.session_state.pop("pending_drive_upload", None)
+                st.rerun()
+
+    if paste_data and not videos:
         st.markdown(
             '<div class="info-bar info-bar-orange">'
             '<span>⚠️</span><span>请先上传视频或输入视频文件夹路径</span>'
@@ -2062,73 +2263,6 @@ with left_col:
 
 # ── 右栏：检查与预览 ──
 with right_col:
-    with st.expander("⚙️ 视频显示设置", expanded=False):
-        video_layout_choice = st.selectbox(
-            "检查视频大小",
-            ["标准", "大", "超大"],
-            key="review_video_layout",
-            help="会调整右侧检查区域的宽度；选择后页面会自动重排。",
-        )
-        default_width = {"标准": 520, "大": 680, "超大": 860}.get(video_layout_choice, 520)
-        review_video_width = st.slider(
-            "播放器宽度",
-            min_value=360,
-            max_value=980,
-            value=int(st.session_state.get("review_video_width", default_width)),
-            step=20,
-            key="review_video_width",
-        )
-        auto_play_review_video = st.checkbox(
-            "切到下一个后自动播放",
-            value=bool(st.session_state.get("auto_play_review_video", True)),
-            key="auto_play_review_video",
-            help="浏览器通常要求静音才能自动播放。",
-        )
-        mute_auto_play_review_video = st.checkbox(
-            "自动播放时静音",
-            value=bool(st.session_state.get("mute_auto_play_review_video", True)),
-            key="mute_auto_play_review_video",
-        )
-
-    active_review = st.session_state.get("active_review_video") or {}
-    active_review_path = active_review.get("path", "")
-    showing_review_video = bool(active_review_path and os.path.isfile(active_review_path))
-
-    if showing_review_video:
-        st.markdown('<div class="section-title">🎞️ 检查视频</div>', unsafe_allow_html=True)
-        st.video(
-            active_review_path,
-            autoplay=auto_play_review_video,
-            muted=mute_auto_play_review_video,
-            width=review_video_width,
-        )
-        if active_review.get("window"):
-            st.caption(f"建议重点听 {active_review['window']} 附近；匹配度：{active_review.get('score', '—')}。")
-        else:
-            st.caption("当前人工复核选中的视频。")
-        st.caption("播放器已预加载当前文件。")
-        if active_review.get("voice_text"):
-            with st.expander("识别到的英文语音", expanded=False):
-                st.write(active_review["voice_text"])
-        st.divider()
-    else:
-        st.markdown('<div class="section-title">🎞️ 检查视频</div>', unsafe_allow_html=True)
-        if videos:
-            first_video = sorted(videos.values(), key=lambda p: p.stem)[0]
-            st.video(str(first_video), muted=True, width=review_video_width)
-            st.caption("选择或确认某条配对后，这里会显示当前视频。")
-        else:
-            st.markdown(
-                '<div style="aspect-ratio:9/16;max-height:420px;'
-                'background:rgba(120,120,128,0.07);border-radius:16px;'
-                'border:1.5px dashed rgba(120,120,128,0.2);'
-                'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;">'
-                '<div style="font-size:3rem;opacity:0.35;">🎬</div>'
-                '<div style="color:#8E8E93;font-size:13px;font-weight:500;">上传视频后显示预览</div>'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
     # ── 音量试听 ──
     if videos:
         first_video_for_audio = sorted(videos.values(), key=lambda p: p.stem)[0]
@@ -2174,6 +2308,7 @@ save_app_settings({
     "filename_length_label": st.session_state.get("filename_length_label", filename_length_label),
     "review_only_confirmed": bool(st.session_state.get("review_only_confirmed", True)),
     "move_to_trash": bool(st.session_state.get("move_to_trash", True)),
+    "burn_subtitles": bool(st.session_state.get("burn_subtitles", False)),
     "drive_target_folder_id": st.session_state.get("drive_target_folder_id"),
     "drive_target_folder_name": st.session_state.get("drive_target_folder_name", ""),
 })

@@ -104,7 +104,7 @@ def _oauth_thread() -> None:
     try:
         from google_auth_oauthlib.flow import InstalledAppFlow
         flow = InstalledAppFlow.from_client_secrets_file(str(CREDS_PATH), SCOPES)
-        creds = flow.run_local_server(port=0, open_browser=True)
+        creds = flow.run_local_server(port=0, open_browser=True, prompt="select_account")
         TOKEN_PATH.write_text(creds.to_json())
     except Exception as e:
         # 把错误写到临时文件，让 UI 侧读取

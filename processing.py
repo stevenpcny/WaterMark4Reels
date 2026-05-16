@@ -136,6 +136,24 @@ def write_caption_file(output_file: Path, caption: str) -> tuple[bool, str]:
         return False, f"写入失败：{e}"
 
 
+def burn_subtitles_for_output(
+    output_file: Path,
+    *,
+    burn_subtitles: bool = False,
+    model_size: str = "base",
+) -> tuple[bool, str]:
+    if not burn_subtitles:
+        return True, ""
+    try:
+        from subtitle import add_subtitles, transcribe_words
+
+        words = transcribe_words(str(output_file), model_size=model_size)
+        add_subtitles(str(output_file), words, str(output_file))
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 def make_result_row(
     item: dict,
     *,
