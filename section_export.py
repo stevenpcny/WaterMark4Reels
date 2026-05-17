@@ -7,9 +7,7 @@ import streamlit as st
 import gdrive
 from image_matching import (
     copy_all_images_preserve_names,
-    copy_image_with_new_name,
     find_image_files,
-    rename_in_folder,
 )
 from processing import (
     build_process_items,
@@ -23,7 +21,7 @@ from processing import (
     verify_output_folder_writable,
     write_job_report,
 )
-from ui_helpers import _pd_dataframe, desktop_output_folder, set_pending_path
+from ui_helpers import _pd_dataframe, desktop_output_folder
 from watermark import add_watermark
 
 
@@ -79,22 +77,17 @@ def render_export_section(
             else:
                 out_path = Path.home() / "Downloads" / "打好水印"
 
-            # ── Fix #8: 提前验证写入权限 ──
+            # 验证写入权限，失败时自动降级到桌面
             path_ok, path_error = verify_output_folder_writable(out_path)
             if not path_ok:
-                st.error(f"输出文件夹无法写入：{path_error}\n请切换到一个有权限的文件夹。")
-                fallback_cols = st.columns(2)
-                output_state_key = (
-                    "output_folder_upload_val"
-                    if import_mode == "拖拽上传视频"
-                    else "output_folder_path_val"
-                )
-                with fallback_cols[0]:
-                    if st.button("改用桌面/打好水印", use_container_width=True, key="fallback_desktop_output"):
-                        set_pending_path(output_state_key, desktop_output_folder())
-                with fallback_cols[1]:
-                    if source_folder and st.button("改用原视频目录/打好水印", use_container_width=True, key="fallback_source_output"):
-                        set_pending_path(output_state_key, str(Path(source_folder) / "打好水印"))
+                fallback_path = Path(desktop_output_folder())
+                fallback_ok, _ = verify_output_folder_writable(fallback_path)
+                if fallback_ok:
+                    st.info(f"输出文件夹无法写入，已自动改为：{fallback_path}")
+                    out_path = fallback_path
+                    path_ok = True
+                else:
+                    st.error(f"输出文件夹无法写入：{path_error}")
 
             # ── 覆盖检测（支持多匹配） ──
             if path_ok:
@@ -165,20 +158,7 @@ def render_export_section(
                     results = []
                     job_records = []
 
-                    _img_assignments = (st.session_state.get("image_match_result") or {}).get("assignments", {})
-                    _img_overrides = st.session_state.get("image_match_overrides", {})
-                    _img_finalized = st.session_state.get("image_match_finalized", {})
-                    def _image_for_review_id(rid: str) -> str | None:
-                        # 优先级：锁定的 > 本轮 override > 本轮自动匹配
-                        if rid in _img_finalized:
-                            return _img_finalized[rid]
-                        if rid in _img_overrides:
-                            return _img_overrides[rid]
-                        info = _img_assignments.get(rid)
-                        return info.get("image") if info else None
-
                     image_dest_folder = out_path / "原图-已匹配"
-                    image_copy_results = []
 
                     # 批量复制所有原图（保留原名）
                     _src_image_folder = (st.session_state.get("source_image_folder") or "").strip()
@@ -243,32 +223,6 @@ def render_export_section(
                                 burn_subtitles=burn_subtitles,
                             )
 
-                        if success:
-                            src_image = _image_for_review_id(item.get("review_id", ""))
-                            if src_image:
-                                try:
-                                    # 先看是否已经在批量复制里——若是则就地改名；否则补做一次复制+改名
-                                    copied_in_dest = bulk_image_map.get(src_image)
-                                    if copied_in_dest and copied_in_dest.exists():
-                                        copied = rename_in_folder(copied_in_dest, output_file.stem)
-                                    else:
-                                        copied = copy_image_with_new_name(
-                                            Path(src_image), image_dest_folder, output_file.stem,
-                                        )
-                                    image_copy_results.append({
-                                        "视频": output_file.name,
-                                        "原图": Path(src_image).name,
-                                        "改名为": copied.name,
-                                        "结果": "✅",
-                                    })
-                                except Exception as img_err:
-                                    image_copy_results.append({
-                                        "视频": output_file.name,
-                                        "原图": Path(src_image).name,
-                                        "改名为": "—",
-                                        "结果": f"❌ {img_err}",
-                                    })
-
                         done += 1
                         progress.progress(done / total)
                         result_row = make_result_row(
@@ -294,15 +248,11 @@ def render_export_section(
 
                     st.dataframe(_pd_dataframe(results), use_container_width=True, hide_index=True)
 
-                    if bulk_image_map or image_copy_results:
+                    if bulk_image_map:
                         st.markdown('<div class="subsection-title">🖼️ 原图处理结果</div>', unsafe_allow_html=True)
-                        renamed_count = sum(1 for r in image_copy_results if r["结果"] == "✅")
-                        kept_count = len(bulk_image_map) - renamed_count
                         st.caption(
-                            f"已复制全部原图到：{image_dest_folder}（共 {len(bulk_image_map)} 张；其中 {renamed_count} 张按视频改名，{kept_count} 张保留原名）"
+                            f"已复制全部原图到：{image_dest_folder}（共 {len(bulk_image_map)} 张，保留当前文件名）"
                         )
-                        if image_copy_results:
-                            st.dataframe(_pd_dataframe(image_copy_results), use_container_width=True, hide_index=True)
 
                     if failed:
                         st.warning(f"{failed} 个文件处理失败，请查看上方结果表格。")
@@ -478,5 +428,4 @@ def render_export_section(
             '</div>',
             unsafe_allow_html=True,
         )
-
 

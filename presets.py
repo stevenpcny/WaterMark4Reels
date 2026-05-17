@@ -95,7 +95,11 @@ def save_all(data: dict) -> None:
 
 def save_last_used(settings: dict) -> None:
     data = load_all()
-    data["last_used"] = settings
+    data["last_used"] = {
+        key: settings[key]
+        for key in DEFAULT_PRESETS["last_used"]
+        if key in settings
+    }
     save_all(data)
 
 
