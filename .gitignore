@@ -1,5 +1,6 @@
 # 运行时生成
 presets.json
+cli-config.json
 token.json
 credentials.json
 used-credentials.json
